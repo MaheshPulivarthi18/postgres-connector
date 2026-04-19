@@ -1,5 +1,7 @@
 import pytest
 import json
+import asyncio
+from datetime import datetime
 from postgres_connector import PostgreSQLModel, Field, JSONField
 from postgres_connector.query_builder import QueryBuilder
 
@@ -45,6 +47,46 @@ def test_query_builder_param_numbering():
     assert "$2" in sql
     assert "%" not in sql
     assert params == [True, 18]
+
+
+def _build_insert_payload(model, data):
+    """Helper: replicate the final_data filtering logic from connector.create()."""
+    for name, field_def in model._fields.items():
+        if field_def.auto_now_add and name not in data:
+            data[name] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    instance = model(**data)
+    final_data = {
+        name: getattr(instance, name)
+        for name, field_def in model._fields.items()
+        if hasattr(instance, name)
+        and not (field_def.auto_increment and getattr(instance, name) is None)
+    }
+    pk = model._get_primary_key()
+    qb = QueryBuilder(model.__table__, model._fields)
+    return qb.build_insert(final_data, returning_pk=pk)
+
+
+class _SimpleModel(PostgreSQLModel):
+    __table__ = "simple_model"
+    id:   int = Field(primary_key=True)
+    name: str = Field(max_length=50)
+
+
+def test_create_excludes_null_auto_increment_pk():
+    """SERIAL PK must not appear in the INSERT column list when not provided."""
+    sql, params = _build_insert_payload(_SimpleModel, {"name": "Alice"})
+    col_list = sql.split("VALUES")[0]
+    assert '"id"' not in col_list, "id should be omitted so SERIAL can auto-generate"
+    assert None not in params, "None must never appear as a parameter"
+    assert params == ["Alice"]
+    assert 'RETURNING "id"' in sql
+
+
+def test_create_keeps_explicit_pk():
+    """A user-supplied PK value must be preserved in the INSERT."""
+    sql, params = _build_insert_payload(_SimpleModel, {"id": 99, "name": "Bob"})
+    assert 99 in params, "explicit id=99 must be included"
+    assert '"id"' in sql.split("VALUES")[0]
 
 
 @pytest.mark.asyncio
