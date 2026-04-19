@@ -224,11 +224,13 @@ class PostgreSQLConnector:
         instance = model(**data)
         await instance._trigger_hook("before_create")
 
-        # Get data back from instance (hooks may have mutated it)
+        # Get data back from instance (hooks may have mutated it).
+        # Skip auto-increment fields with no value — let PostgreSQL SERIAL generate them.
         final_data = {
             name: getattr(instance, name)
-            for name in model._fields
+            for name, field_def in model._fields.items()
             if hasattr(instance, name)
+            and not (field_def.auto_increment and getattr(instance, name) is None)
         }
 
         pk = model._get_primary_key()
