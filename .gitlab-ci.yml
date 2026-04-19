@@ -1,0 +1,65 @@
+stages:
+  - test
+  - build
+  - publish
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  POSTGRES_PASSWORD: "secret"
+  POSTGRES_DB: "test_db"
+  POSTGRES_USER: "postgres"
+
+cache:
+  paths:
+    - .cache/pip
+
+services:
+  - postgres:16
+
+# --- Test Stage ---
+test:
+  stage: test
+  image: python:$PYTHON_VERSION
+  parallel:
+    matrix:
+      - PYTHON_VERSION: ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]
+  variables:
+    DB_HOST: "postgres"
+    DB_PORT: "5432"
+    DB_USER: "postgres"
+    DB_PASSWORD: "secret"
+    DB_NAME: "test_db"
+  script:
+    - python --version
+    - pip install --upgrade pip
+    - pip install -e ".[test]"
+    - pytest -q
+
+# --- Build Stage ---
+build:
+  stage: build
+  image: python:3.12
+  needs: ["test"]
+  script:
+    - rm -rf dist/
+    - pip install --upgrade build twine
+    - python -m build
+    - twine check dist/*
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
+
+# --- Publish Stage ---
+publish:
+  stage: publish
+  image: python:3.12
+  needs: ["build"]
+  only:
+    - tags
+  id_tokens:
+    PYPI_ID_TOKEN:
+      aud: pypi
+  script:
+    - pip install --upgrade twine
+    - twine upload --skip-existing dist/*

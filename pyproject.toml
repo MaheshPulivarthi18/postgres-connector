@@ -1,0 +1,129 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "oceanic-postgres-orm"
+dynamic = ["version"]
+description = "A production-grade async PostgreSQL ORM with LoopBack-style nested relation queries, typed model instances, and zero N+1."
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Mahesh Pulivarthi" },
+]
+maintainers = [
+    { name = "Mahesh Pulivarthi" },
+]
+keywords = [
+    "postgresql",
+    "postgres",
+    "orm",
+    "async",
+    "asyncio",
+    "fastapi",
+    "asyncpg",
+    "loopback",
+    "database",
+    "relations",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Web Environment",
+    "Framework :: AsyncIO",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Database :: Front-Ends",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "asyncpg>=0.29.0",
+]
+
+[project.urls]
+Homepage      = "https://gitlab.com/MaheshPulivarthi181/postgres-orm-connector"
+Documentation = "https://gitlab.com/MaheshPulivarthi181/postgres-orm-connector#readme"
+Repository    = "https://gitlab.com/MaheshPulivarthi181/postgres-orm-connector.git"
+Issues        = "https://gitlab.com/MaheshPulivarthi181/postgres-orm-connector/-/issues"
+Changelog     = "https://gitlab.com/MaheshPulivarthi181/postgres-orm-connector/-/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+fastapi = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "build>=1.2.0",
+    "twine>=5.0.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+]
+
+# ---------------------------------------------------------------------------
+# Hatch build configuration
+# ---------------------------------------------------------------------------
+
+[tool.hatch.version]
+path = "src/postgres_connector/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/postgres_connector"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/postgres_connector",
+    "tests",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+exclude = [
+    "venv",
+    ".github",
+    "**/__pycache__",
+    "**/*.pyc",
+]
+
+# ---------------------------------------------------------------------------
+# Tooling
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-ra -q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.8"
+ignore_missing_imports = true
+warn_unused_ignores = true
