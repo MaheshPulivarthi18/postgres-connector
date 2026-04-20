@@ -102,7 +102,6 @@ class Migrator:
         column_defs = [self._build_column_sql(field) for field in model._fields.values()]
         sql = f'CREATE TABLE "{table_name}" ({", ".join(column_defs)})'
 
-        self._pool.log_query(sql)
         await self._pool.execute(sql, [])
 
     async def _sync_columns(
@@ -118,7 +117,6 @@ class Migrator:
                 logger.info("Migrator: Adding column '%s' to table '%s'", col_name, table_name)
                 col_sql = self._build_column_sql(field)
                 sql = f'ALTER TABLE "{table_name}" ADD COLUMN {col_sql}'
-                self._pool.log_query(sql)
                 await self._pool.execute(sql, [])
 
     def _build_column_sql(self, field: FieldDefinition) -> str:

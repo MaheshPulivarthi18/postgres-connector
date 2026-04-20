@@ -40,6 +40,7 @@ _OPERATORS: Dict[str, str] = {
     "nin":     "NOT IN",
     "between": "BETWEEN",
     "regexp":  "~",
+    "contains": "@>",
 }
 
 
@@ -105,10 +106,9 @@ class QueryBuilder:
         """
         self._params = []
         self._param_idx = 0
-        select = self._select_clause(opts.fields if opts else None)
-
-        placeholders = self._placeholders(fk_values)
-        where_parts = [f'"{self.table}"."{fk_field}" IN ({placeholders})']
+        sql_select = self._select_clause(opts.fields if opts else None)
+        sql_where  = f'"{self.table}"."{fk_field}" = ANY({self._p(fk_values)})'
+        where_parts = [sql_where]
 
         if opts and opts.where:
             extra = self._build_where_dict(opts.where)
@@ -118,7 +118,7 @@ class QueryBuilder:
         where = "WHERE " + " AND ".join(where_parts)
 
         parts = [
-            select,
+            sql_select,
             where,
             self._order_clause(opts.order if opts else None),
             self._limit_clause(opts.limit if opts else None),
@@ -137,10 +137,9 @@ class QueryBuilder:
         """
         self._params = []
         self._param_idx = 0
-        select = self._select_clause(opts.fields if opts else None)
-
-        placeholders = self._placeholders(pk_values)
-        where_parts = [f'"{self.table}"."{pk_field}" IN ({placeholders})']
+        sql_select = self._select_clause(opts.fields if opts else None)
+        sql_where  = f'"{self.table}"."{pk_field}" = ANY({self._p(pk_values)})'
+        where_parts = [sql_where]
 
         if opts and opts.where:
             extra = self._build_where_dict(opts.where)
@@ -148,13 +147,14 @@ class QueryBuilder:
                 where_parts.append(f"({extra})")
 
         where = "WHERE " + " AND ".join(where_parts)
-        parts = [select, where]
+        parts = [sql_select, where]
         return self._join(parts), list(self._params)
 
     def build_insert(
         self,
-        data:         Dict[str, Any],
-        returning_pk: Optional[str] = None,
+        data:          Dict[str, Any],
+        returning_pk:  Optional[str] = None,
+        returning_all: bool = False,
     ) -> Tuple[str, List[Any]]:
         self._params = []
         self._param_idx = 0
@@ -172,7 +172,9 @@ class QueryBuilder:
         marks = self._placeholders(list(serialized_data.values()))
         sql   = f'INSERT INTO "{self.table}" ({cols}) VALUES ({marks})'
 
-        if returning_pk:
+        if returning_all:
+            sql += ' RETURNING *'
+        elif returning_pk:
             sql += f' RETURNING "{returning_pk}"'
 
         return sql, list(self._params)

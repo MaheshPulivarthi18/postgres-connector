@@ -235,13 +235,14 @@ class PostgreSQLConnector:
 
         pk = model._get_primary_key()
         qb = QueryBuilder(model.__table__, model._fields)
-        sql, params = qb.build_insert(final_data, returning_pk=pk)
+        sql, params = qb.build_insert(final_data, returning_all=True)
 
-        self._pool.log_query(sql, params)
         row = await self._pool.fetch_one(sql, params)
 
-        if pk and row and pk in row:
-            object.__setattr__(instance, pk, row[pk])
+        if row:
+            for key, val in row.items():
+                if key in model._fields:
+                    object.__setattr__(instance, key, val)
 
         await instance._trigger_hook("after_create")
         return instance
@@ -445,11 +446,9 @@ class PostgreSQLConnector:
         return pk
 
     async def _fetch(self, sql: str, params: List[Any]) -> List[dict]:
-        self._pool.log_query(sql, params)
         return await self._pool.fetch_all(sql, params)
 
     async def _execute(self, sql: str, params: List[Any]) -> int:
-        self._pool.log_query(sql, params)
         return await self._pool.execute(sql, params)
 
     def __repr__(self) -> str:

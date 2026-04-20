@@ -347,7 +347,6 @@ class RelationResolver:
         return await self._fetch(sql, params)
 
     async def _fetch(self, sql: str, params: List[Any]) -> List[Dict]:
-        self._pool.log_query(sql, params)
         return await self._pool.fetch_all(sql, params)
 
     # ── Helpers ───────────────────────────────────────────────────────────

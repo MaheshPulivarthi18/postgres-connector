@@ -134,6 +134,7 @@ class ConnectionPool:
     async def fetch_all(self, sql: str, params: List[Any]) -> List[Dict[str, Any]]:
         """Execute a SELECT and return all rows as a list of dicts."""
         self._assert_connected()
+        self.log_query(sql, params)
         async with self._pool.acquire() as conn:  # type: ignore[union-attr]
             rows = await conn.fetch(sql, *params)
             return [dict(r) for r in rows]
@@ -141,6 +142,7 @@ class ConnectionPool:
     async def fetch_one(self, sql: str, params: List[Any]) -> Optional[Dict[str, Any]]:
         """Execute a SELECT and return the first row as a dict, or None."""
         self._assert_connected()
+        self.log_query(sql, params)
         async with self._pool.acquire() as conn:  # type: ignore[union-attr]
             row = await conn.fetchrow(sql, *params)
             return dict(row) if row else None
@@ -151,6 +153,7 @@ class ConnectionPool:
         For DDL (CREATE TABLE, ALTER TABLE), returns 0.
         """
         self._assert_connected()
+        self.log_query(sql, params)
         async with self._pool.acquire() as conn:  # type: ignore[union-attr]
             result: str = await conn.execute(sql, *params)
             # asyncpg returns strings like "UPDATE 3", "DELETE 2", "INSERT 0 1"
