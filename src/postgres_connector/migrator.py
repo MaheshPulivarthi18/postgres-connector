@@ -99,9 +99,20 @@ class Migrator:
         table_name = model.__table__
         logger.info("Migrator: Creating table '%s'", table_name)
 
-        column_defs = [self._build_column_sql(field) for field in model._fields.values()]
-        sql = f'CREATE TABLE "{table_name}" ({", ".join(column_defs)})'
+        pks = [f.name for f in model._fields.values() if f.primary_key]
+        has_composite_pk = len(pks) > 1
 
+        column_defs = []
+        for field in model._fields.values():
+            # If composite PK, don't add "PRIMARY KEY" to individual columns
+            col_sql = self._build_column_sql(field, skip_primary_key=has_composite_pk)
+            column_defs.append(col_sql)
+
+        if has_composite_pk:
+            pk_list = ", ".join([f'"{pk}"' for pk in pks])
+            column_defs.append(f"PRIMARY KEY ({pk_list})")
+
+        sql = f'CREATE TABLE "{table_name}" ({", ".join(column_defs)})'
         await self._pool.execute(sql, [])
 
     async def _sync_columns(
@@ -119,11 +130,11 @@ class Migrator:
                 sql = f'ALTER TABLE "{table_name}" ADD COLUMN {col_sql}'
                 await self._pool.execute(sql, [])
 
-    def _build_column_sql(self, field: FieldDefinition) -> str:
+    def _build_column_sql(self, field: FieldDefinition, skip_primary_key: bool = False) -> str:
         """Convert a FieldDefinition to a SQL column definition string."""
 
         # Primary key with auto-increment → SERIAL PRIMARY KEY
-        if field.primary_key and field.auto_increment:
+        if field.primary_key and field.auto_increment and not skip_primary_key:
             return f'"{field.name}" SERIAL PRIMARY KEY'
 
         pg_type = TYPE_MAP.get(field.python_type, "VARCHAR(255)")
@@ -138,8 +149,10 @@ class Migrator:
         parts = [f'"{field.name}"', pg_type]
 
         # PRIMARY KEY implies NOT NULL
-        if field.primary_key:
+        if field.primary_key and not skip_primary_key:
             parts.append("PRIMARY KEY")
+        elif field.primary_key and skip_primary_key:
+            parts.append("NOT NULL")
         elif not field.nullable:
             parts.append("NOT NULL")
 
