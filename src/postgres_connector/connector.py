@@ -108,6 +108,24 @@ class PostgreSQLConnector:
         """
         await self._migrator.migrate()
 
+    async def generate_migrations(self, directory: str) -> Optional[str]:
+        """
+        Generate a .sql migration file containing schema changes.
+        """
+        return await self._migrator.generate_migrations(directory)
+
+    async def run_migrations(self, directory: str) -> int:
+        """
+        Run all pending .sql migrations from the given directory.
+        """
+        return await self._migrator.run_migrations(directory)
+
+    async def rollback_migrations(self, directory: str) -> int:
+        """
+        Rollback the most recently applied migration.
+        """
+        return await self._migrator.rollback_migrations(directory)
+
     @property
     def is_connected(self) -> bool:
         return self._pool.is_connected
@@ -118,6 +136,7 @@ class PostgreSQLConnector:
         self,
         model:  Type[PostgreSQLModel],
         filter: Union[dict, FilterOptions] = {},
+        session: Optional[Any] = None,
     ) -> List[PostgreSQLModel]:
         """
         Find all records matching the filter.
@@ -146,7 +165,7 @@ class PostgreSQLConnector:
         qb = QueryBuilder(model.__table__, model._fields)
         sql, params = qb.build_select(opts)
 
-        rows      = await self._fetch(sql, params)
+        rows      = await self._fetch(sql, params, session=session)
         instances = [model._from_row(row) for row in rows]
 
         if opts.include and instances:
@@ -160,6 +179,7 @@ class PostgreSQLConnector:
         self,
         model:  Type[PostgreSQLModel],
         filter: Union[dict, FilterOptions] = {},
+        session: Optional[Any] = None,
     ) -> Optional[PostgreSQLModel]:
         """
         Find the first record matching the filter, or None.
@@ -172,7 +192,7 @@ class PostgreSQLConnector:
         """
         opts       = self._to_filter(filter)
         opts.limit = 1
-        results    = await self.find(model, opts)
+        results    = await self.find(model, opts, session=session)
         return results[0] if results else None
 
     # ── find_by_id ────────────────────────────────────────────────────────
@@ -182,6 +202,7 @@ class PostgreSQLConnector:
         model:  Type[PostgreSQLModel],
         id:     Any,
         filter: Union[dict, FilterOptions] = {},
+        session: Optional[Any] = None,
     ) -> Optional[PostgreSQLModel]:
         """
         Find a record by its primary key.
@@ -194,7 +215,7 @@ class PostgreSQLConnector:
         pk = self._require_pk(model)
         opts = self._to_filter(filter)
         opts.where = {**(opts.where or {}), pk: id}
-        return await self.find_one(model, opts)
+        return await self.find_one(model, opts, session=session)
 
     # ── create ────────────────────────────────────────────────────────────
 
@@ -202,6 +223,7 @@ class PostgreSQLConnector:
         self,
         model: Type[PostgreSQLModel],
         data:  Dict[str, Any],
+        session: Optional[Any] = None,
     ) -> PostgreSQLModel:
         """
         Insert a new row and return the created model instance.
@@ -220,6 +242,13 @@ class PostgreSQLConnector:
             if field_def.auto_now_add and name not in data:
                 data[name] = now
 
+        # Validate input data
+        for name, value in data.items():
+            field_def = model._fields.get(name)
+            if field_def and value is not None and not field_def.is_json:
+                if not isinstance(value, field_def.python_type):
+                    raise ConfigurationError(f"Field '{name}' expects {field_def.python_type.__name__}, got {type(value).__name__}")
+
         # Create temporary instance to trigger hooks
         instance = model(**data)
         await instance._trigger_hook("before_create")
@@ -237,7 +266,12 @@ class PostgreSQLConnector:
         qb = QueryBuilder(model.__table__, model._fields)
         sql, params = qb.build_insert(final_data, returning_all=True)
 
-        row = await self._pool.fetch_one(sql, params)
+        if session:
+            self._pool.log_query(sql, params)
+            raw_row = await session.fetchrow(sql, *params)
+            row = dict(raw_row) if raw_row else None
+        else:
+            row = await self._pool.fetch_one(sql, params)
 
         if row:
             for key, val in row.items():
@@ -254,6 +288,7 @@ class PostgreSQLConnector:
         model: Type[PostgreSQLModel],
         where: Dict[str, Any],
         data:  Dict[str, Any],
+        session: Optional[Any] = None,
     ) -> int:
         """
         Update all records matching `where`. Returns affected row count.
@@ -271,9 +306,16 @@ class PostgreSQLConnector:
             if field_def.auto_now:
                 data[name] = now
 
+        # Validate input data
+        for name, value in data.items():
+            field_def = model._fields.get(name)
+            if field_def and value is not None and not field_def.is_json:
+                if not isinstance(value, field_def.python_type):
+                    raise ConfigurationError(f"Field '{name}' expects {field_def.python_type.__name__}, got {type(value).__name__}")
+
         qb = QueryBuilder(model.__table__, model._fields)
         sql, params = qb.build_update(where, data)
-        return await self._execute(sql, params)
+        return await self._execute(sql, params, session=session)
 
     # ── update_by_id ──────────────────────────────────────────────────────
 
@@ -282,6 +324,7 @@ class PostgreSQLConnector:
         model: Type[PostgreSQLModel],
         id:    Any,
         data:  Dict[str, Any],
+        session: Optional[Any] = None,
     ) -> Optional[PostgreSQLModel]:
         """
         Update a single record by PK and return the updated instance.
@@ -290,8 +333,8 @@ class PostgreSQLConnector:
             user = await connector.update_by_id(User, 42, {"name": "Rajesh"})
         """
         pk = self._require_pk(model)
-        await self.update_all(model, {pk: id}, data)
-        return await self.find_by_id(model, id)
+        await self.update_all(model, {pk: id}, data, session=session)
+        return await self.find_by_id(model, id, session=session)
 
     # ── delete_all ────────────────────────────────────────────────────────
 
@@ -299,6 +342,7 @@ class PostgreSQLConnector:
         self,
         model: Type[PostgreSQLModel],
         where: Dict[str, Any],
+        session: Optional[Any] = None,
     ) -> int:
         """
         Delete all records matching `where`. Returns affected row count.
@@ -308,11 +352,11 @@ class PostgreSQLConnector:
         """
         if "deleted_at" in model._fields:
             now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-            return await self.update_all(model, where, {"deleted_at": now})
+            return await self.update_all(model, where, {"deleted_at": now}, session=session)
 
         qb = QueryBuilder(model.__table__, model._fields)
         sql, params = qb.build_delete(where)
-        return await self._execute(sql, params)
+        return await self._execute(sql, params, session=session)
 
     # ── delete_by_id ──────────────────────────────────────────────────────
 
@@ -320,6 +364,7 @@ class PostgreSQLConnector:
         self,
         model: Type[PostgreSQLModel],
         id:    Any,
+        session: Optional[Any] = None,
     ) -> bool:
         """
         Delete a record by PK. Returns True if a row was deleted.
@@ -328,7 +373,7 @@ class PostgreSQLConnector:
             deleted = await connector.delete_by_id(User, 42)
         """
         pk       = self._require_pk(model)
-        affected = await self.delete_all(model, {pk: id})
+        affected = await self.delete_all(model, {pk: id}, session=session)
         return affected > 0
 
     # ── count / exists ────────────────────────────────────────────────────
@@ -337,6 +382,7 @@ class PostgreSQLConnector:
         self,
         model: Type[PostgreSQLModel],
         where: Dict[str, Any] = {},
+        session: Optional[Any] = None,
     ) -> int:
         """
         Count records matching `where`.
@@ -346,13 +392,14 @@ class PostgreSQLConnector:
         """
         qb = QueryBuilder(model.__table__, model._fields)
         sql, params = qb.build_count(where)
-        rows = await self._fetch(sql, params)
+        rows = await self._fetch(sql, params, session=session)
         return int(rows[0].get("_count", 0)) if rows else 0
 
     async def exists(
         self,
         model: Type[PostgreSQLModel],
         where: Dict[str, Any],
+        session: Optional[Any] = None,
     ) -> bool:
         """
         Return True if at least one record matches `where`.
@@ -360,7 +407,7 @@ class PostgreSQLConnector:
         Example:
             taken = await connector.exists(User, {"email": "raj@example.com"})
         """
-        return await self.count(model, where) > 0
+        return await self.count(model, where, session=session) > 0
 
     # ── Raw SQL ───────────────────────────────────────────────────────────
 
@@ -368,6 +415,7 @@ class PostgreSQLConnector:
         self,
         sql:    str,
         params: List[Any] = [],
+        session: Optional[Any] = None,
     ) -> List[dict]:
         """
         Execute a raw SELECT and return a list of plain dicts.
@@ -382,17 +430,18 @@ class PostgreSQLConnector:
                 [True],
             )
         """
-        return await self._fetch(sql, params)
+        return await self._fetch(sql, params, session=session)
 
     async def raw_execute(
         self,
         sql:    str,
         params: List[Any] = [],
+        session: Optional[Any] = None,
     ) -> int:
         """
         Execute a raw INSERT / UPDATE / DELETE / DDL and return affected row count.
         """
-        return await self._execute(sql, params)
+        return await self._execute(sql, params, session=session)
 
     # ── Transactions ──────────────────────────────────────────────────────
 
@@ -445,10 +494,21 @@ class PostgreSQLConnector:
             )
         return pk
 
-    async def _fetch(self, sql: str, params: List[Any]) -> List[dict]:
+    async def _fetch(self, sql: str, params: List[Any], session: Optional[Any] = None) -> List[dict]:
+        if session:
+            self._pool.log_query(sql, params)
+            rows = await session.fetch(sql, *params)
+            return [dict(r) for r in rows]
         return await self._pool.fetch_all(sql, params)
 
-    async def _execute(self, sql: str, params: List[Any]) -> int:
+    async def _execute(self, sql: str, params: List[Any], session: Optional[Any] = None) -> int:
+        if session:
+            self._pool.log_query(sql, params)
+            result = await session.execute(sql, *params)
+            try:
+                return int(result.split()[-1])
+            except (ValueError, IndexError, AttributeError):
+                return 0
         return await self._pool.execute(sql, params)
 
     def __repr__(self) -> str:

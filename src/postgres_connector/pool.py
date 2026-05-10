@@ -212,12 +212,12 @@ class ConnectionPool:
             )
 
     def log_query(self, sql: str, params: Optional[List[Any]] = None) -> None:
-        """Print SQL queries to the console if echo is enabled."""
+        """Log SQL queries if echo is enabled."""
         if self._echo:
             cleaned_sql = " ".join(sql.split())
-            print(f"\033[94m[ORM QUERY]\033[0m {cleaned_sql}")
+            logger.info("\033[94m[ORM QUERY]\033[0m %s", cleaned_sql)
             if params:
-                print(f"\033[92m[PARAMS]   \033[0m {params}")
+                logger.info("\033[92m[PARAMS]   \033[0m %s", params)
 
     def __repr__(self) -> str:
         status = "connected" if self.is_connected else "disconnected"

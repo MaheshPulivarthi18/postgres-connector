@@ -80,6 +80,11 @@ class QueryBuilder:
         """Return comma-separated $N placeholders for a list of values."""
         return ", ".join(self._p(v) for v in values)
 
+    def _validate_field(self, field: str) -> None:
+        """Ensure the field exists on the model to prevent SQL injection via keys."""
+        if field not in self.fields and field not in ("and", "or"):
+            raise QueryError(f"Field '{field}' does not exist on model '{self.table}'")
+
     # ── Public builders ───────────────────────────────────────────────────
 
     def build_select(self, opts: FilterOptions) -> Tuple[str, List[Any]]:
@@ -106,6 +111,7 @@ class QueryBuilder:
         """
         self._params = []
         self._param_idx = 0
+        self._validate_field(fk_field)
         sql_select = self._select_clause(opts.fields if opts else None)
         sql_where  = f'"{self.table}"."{fk_field}" = ANY({self._p(fk_values)})'
         where_parts = [sql_where]
@@ -137,6 +143,7 @@ class QueryBuilder:
         """
         self._params = []
         self._param_idx = 0
+        self._validate_field(pk_field)
         sql_select = self._select_clause(opts.fields if opts else None)
         sql_where  = f'"{self.table}"."{pk_field}" = ANY({self._p(pk_values)})'
         where_parts = [sql_where]
@@ -162,6 +169,7 @@ class QueryBuilder:
 
         serialized_data = {}
         for k, v in data.items():
+            self._validate_field(k)
             field_def = self.fields.get(k)
             if field_def and field_def.is_json and not isinstance(v, (str, bytes)) and v is not None:
                 serialized_data[k] = json.dumps(v)
@@ -195,6 +203,7 @@ class QueryBuilder:
 
         set_parts = []
         for k, v in data.items():
+            self._validate_field(k)
             field_def = self.fields.get(k)
             if field_def and field_def.is_json and not isinstance(v, (str, bytes)) and v is not None:
                 v = json.dumps(v)
@@ -228,6 +237,8 @@ class QueryBuilder:
 
     def _select_clause(self, fields: Optional[List[str]]) -> str:
         if fields:
+            for f in fields:
+                self._validate_field(f)
             cols = ", ".join(f'"{self.table}"."{f}"' for f in fields)
         else:
             cols = f'"{self.table}".*'
@@ -260,14 +271,17 @@ class QueryBuilder:
                 parts.append(f"({sub})")
 
             elif isinstance(value, dict):
+                self._validate_field(key)
                 # Operator-based: {"age": {"gt": 18, "lte": 65}}
                 for op, op_val in value.items():
                     parts.append(self._operator_clause(key, op, op_val))
 
             elif value is None:
+                self._validate_field(key)
                 parts.append(f'"{self.table}"."{key}" IS NULL')
 
             else:
+                self._validate_field(key)
                 # Simple equality
                 parts.append(f'"{self.table}"."{key}" = {self._p(value)}')
 
@@ -313,6 +327,7 @@ class QueryBuilder:
             if not tokens:
                 continue
             field     = tokens[0]
+            self._validate_field(field)
             direction = tokens[1].upper() if len(tokens) > 1 else "ASC"
             if direction not in ("ASC", "DESC"):
                 raise QueryError(

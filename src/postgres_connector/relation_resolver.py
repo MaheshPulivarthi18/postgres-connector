@@ -101,10 +101,14 @@ class RelationResolver:
 
         scopes = [_parse_include(item) for item in include]
 
-        await asyncio.gather(*(
+        results = await asyncio.gather(*(
             self._resolve_one(instances, scope, model_class)
             for scope in scopes
-        ))
+        ), return_exceptions=True)
+
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     # ── Per-relation dispatch ─────────────────────────────────────────────
 
@@ -153,24 +157,29 @@ class RelationResolver:
                 p._set_relation(rel_def.name, [])
             return
 
-        rows = await self._query_by_fk(
-            target_cls.__table__, rel_def.foreign_key, parent_ids,
-            scope.scope, target_cls._fields,
-        )
-        children = [target_cls._from_row(r) for r in rows]
+        try:
+            rows = await self._query_by_fk(
+                target_cls.__table__, rel_def.foreign_key, parent_ids,
+                scope.scope, target_cls._fields,
+            )
+            children = [target_cls._from_row(r) for r in rows]
 
-        if scope.scope and scope.scope.include:
-            await self.resolve(children, scope.scope.include, target_cls)
+            if scope.scope and scope.scope.include:
+                await self.resolve(children, scope.scope.include, target_cls)
 
-        grouped: dict = {pid: [] for pid in parent_ids}
-        for child in children:
-            fk_val = child.__dict__.get(rel_def.foreign_key)
-            if fk_val in grouped:
-                grouped[fk_val].append(child)
+            grouped: dict = {pid: [] for pid in parent_ids}
+            for child in children:
+                fk_val = child.__dict__.get(rel_def.foreign_key)
+                if fk_val in grouped:
+                    grouped[fk_val].append(child)
 
-        for parent in parents:
-            pk_val = parent.__dict__.get(parent_pk)
-            parent._set_relation(rel_def.name, grouped.get(pk_val, []))
+            for parent in parents:
+                pk_val = parent.__dict__.get(parent_pk)
+                parent._set_relation(rel_def.name, grouped.get(pk_val, []))
+        except Exception:
+            for p in parents:
+                p._set_relation(rel_def.name, [])
+            raise
 
     # ── hasOne ────────────────────────────────────────────────────────────
 
@@ -190,24 +199,29 @@ class RelationResolver:
                 p._set_relation(rel_def.name, None)
             return
 
-        rows = await self._query_by_fk(
-            target_cls.__table__, rel_def.foreign_key, parent_ids,
-            scope.scope, target_cls._fields,
-        )
-        children = [target_cls._from_row(r) for r in rows]
+        try:
+            rows = await self._query_by_fk(
+                target_cls.__table__, rel_def.foreign_key, parent_ids,
+                scope.scope, target_cls._fields,
+            )
+            children = [target_cls._from_row(r) for r in rows]
 
-        if scope.scope and scope.scope.include:
-            await self.resolve(children, scope.scope.include, target_cls)
+            if scope.scope and scope.scope.include:
+                await self.resolve(children, scope.scope.include, target_cls)
 
-        grouped: dict = {}
-        for child in children:
-            fk_val = child.__dict__.get(rel_def.foreign_key)
-            if fk_val not in grouped:
-                grouped[fk_val] = child
+            grouped: dict = {}
+            for child in children:
+                fk_val = child.__dict__.get(rel_def.foreign_key)
+                if fk_val not in grouped:
+                    grouped[fk_val] = child
 
-        for parent in parents:
-            pk_val = parent.__dict__.get(parent_pk)
-            parent._set_relation(rel_def.name, grouped.get(pk_val))
+            for parent in parents:
+                pk_val = parent.__dict__.get(parent_pk)
+                parent._set_relation(rel_def.name, grouped.get(pk_val))
+        except Exception:
+            for p in parents:
+                p._set_relation(rel_def.name, None)
+            raise
 
     # ── belongsTo ────────────────────────────────────────────────────────
 
@@ -232,20 +246,25 @@ class RelationResolver:
                 c._set_relation(rel_def.name, None)
             return
 
-        rows = await self._query_by_pk(
-            target_cls.__table__, target_pk, fk_vals,
-            scope.scope, target_cls._fields,
-        )
-        parents = [target_cls._from_row(r) for r in rows]
+        try:
+            rows = await self._query_by_pk(
+                target_cls.__table__, target_pk, fk_vals,
+                scope.scope, target_cls._fields,
+            )
+            parents = [target_cls._from_row(r) for r in rows]
 
-        if scope.scope and scope.scope.include:
-            await self.resolve(parents, scope.scope.include, target_cls)
+            if scope.scope and scope.scope.include:
+                await self.resolve(parents, scope.scope.include, target_cls)
 
-        by_pk = {p.__dict__.get(target_pk): p for p in parents}
+            by_pk = {p.__dict__.get(target_pk): p for p in parents}
 
-        for child in children:
-            fk_val = child.__dict__.get(rel_def.foreign_key)
-            child._set_relation(rel_def.name, by_pk.get(fk_val))
+            for child in children:
+                fk_val = child.__dict__.get(rel_def.foreign_key)
+                child._set_relation(rel_def.name, by_pk.get(fk_val))
+        except Exception:
+            for c in children:
+                c._set_relation(rel_def.name, None)
+            raise
 
     # ── hasManyThrough ────────────────────────────────────────────────────
 
@@ -271,54 +290,59 @@ class RelationResolver:
 
         through_cls = registry.get(rel_def.through_model)
 
-        # Step 1: Query junction table
-        junction_rows = await self._query_by_fk(
-            through_cls.__table__, rel_def.foreign_key, parent_ids,
-            None, through_cls._fields,
-        )
+        try:
+            # Step 1: Query junction table
+            junction_rows = await self._query_by_fk(
+                through_cls.__table__, rel_def.foreign_key, parent_ids,
+                None, through_cls._fields,
+            )
 
-        if not junction_rows:
+            if not junction_rows:
+                for p in parents:
+                    p._set_relation(rel_def.name, [])
+                return
+
+            # Step 2: Collect unique target IDs
+            target_ids = list({
+                row[rel_def.other_key]
+                for row in junction_rows
+                if row.get(rel_def.other_key) is not None
+            })
+
+            if not target_ids:
+                for p in parents:
+                    p._set_relation(rel_def.name, [])
+                return
+
+            # Step 3: Query target table
+            target_pk = self._pk(target_cls)
+            target_rows = await self._query_by_pk(
+                target_cls.__table__, target_pk, target_ids,
+                scope.scope, target_cls._fields,
+            )
+            targets = [target_cls._from_row(r) for r in target_rows]
+
+            if scope.scope and scope.scope.include:
+                await self.resolve(targets, scope.scope.include, target_cls)
+
+            # Step 4: Stitch via junction table
+            target_by_pk = {t.__dict__.get(target_pk): t for t in targets}
+            parent_to_targets: dict = {pid: [] for pid in parent_ids}
+
+            for j_row in junction_rows:
+                parent_fk  = j_row.get(rel_def.foreign_key)
+                target_fk  = j_row.get(rel_def.other_key)
+                target_obj = target_by_pk.get(target_fk)
+                if target_obj and parent_fk in parent_to_targets:
+                    parent_to_targets[parent_fk].append(target_obj)
+
+            for parent in parents:
+                pk_val = parent.__dict__.get(parent_pk)
+                parent._set_relation(rel_def.name, parent_to_targets.get(pk_val, []))
+        except Exception:
             for p in parents:
                 p._set_relation(rel_def.name, [])
-            return
-
-        # Step 2: Collect unique target IDs
-        target_ids = list({
-            row[rel_def.other_key]
-            for row in junction_rows
-            if row.get(rel_def.other_key) is not None
-        })
-
-        if not target_ids:
-            for p in parents:
-                p._set_relation(rel_def.name, [])
-            return
-
-        # Step 3: Query target table
-        target_pk = self._pk(target_cls)
-        target_rows = await self._query_by_pk(
-            target_cls.__table__, target_pk, target_ids,
-            scope.scope, target_cls._fields,
-        )
-        targets = [target_cls._from_row(r) for r in target_rows]
-
-        if scope.scope and scope.scope.include:
-            await self.resolve(targets, scope.scope.include, target_cls)
-
-        # Step 4: Stitch via junction table
-        target_by_pk = {t.__dict__.get(target_pk): t for t in targets}
-        parent_to_targets: dict = {pid: [] for pid in parent_ids}
-
-        for j_row in junction_rows:
-            parent_fk  = j_row.get(rel_def.foreign_key)
-            target_fk  = j_row.get(rel_def.other_key)
-            target_obj = target_by_pk.get(target_fk)
-            if target_obj and parent_fk in parent_to_targets:
-                parent_to_targets[parent_fk].append(target_obj)
-
-        for parent in parents:
-            pk_val = parent.__dict__.get(parent_pk)
-            parent._set_relation(rel_def.name, parent_to_targets.get(pk_val, []))
+            raise
 
     # ── Low-level query helpers ───────────────────────────────────────────
 
