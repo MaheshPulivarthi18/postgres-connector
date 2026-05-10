@@ -26,6 +26,7 @@ TYPE_MAP = {
     float:    "DOUBLE PRECISION",
     dict:     "JSONB",
     list:     "JSONB",
+    datetime: "TIMESTAMP",
 }
 
 class Migrator:
@@ -50,6 +51,16 @@ class Migrator:
 
         for model in registry.all().values():
             up_sql, down_sql = await self._sync_foreign_keys(model)
+            up_queries.extend(up_sql)
+            down_queries.extend(down_sql)
+
+        for model in registry.all().values():
+            up_sql, down_sql = await self._sync_unique_constraints(model)
+            up_queries.extend(up_sql)
+            down_queries.extend(down_sql)
+
+        for model in registry.all().values():
+            up_sql, down_sql = await self._sync_indexes(model)
             up_queries.extend(up_sql)
             down_queries.extend(down_sql)
             
@@ -223,10 +234,141 @@ class Migrator:
         down_queries = []
         for col_name, field in model._fields.items():
             if col_name not in db_cols:
+                # New column — add it
                 col_sql = self._build_column_sql(field)
                 up_queries.append(f'ALTER TABLE "{table_name}" ADD COLUMN {col_sql}')
                 down_queries.append(f'ALTER TABLE "{table_name}" DROP COLUMN "{col_name}"')
+            else:
+                # Existing column — detect alterations
+                db_col = db_cols[col_name]
+                alter_up, alter_down = self._detect_column_changes(table_name, field, db_col)
+                up_queries.extend(alter_up)
+                down_queries.extend(alter_down)
         return up_queries, down_queries
+
+    def _detect_column_changes(self, table_name: str, field: FieldDefinition, db_col: ColumnInfo) -> Tuple[List[str], List[str]]:
+        """Compare a model field against its current DB column and generate ALTER statements."""
+        up_queries = []
+        down_queries = []
+
+        # Skip primary key / auto_increment (SERIAL) columns — altering these is too dangerous
+        if field.primary_key or field.auto_increment:
+            return up_queries, down_queries
+
+        # --- Type change detection ---
+        expected_type = self._get_expected_type(field)
+        db_type = db_col.data_type.upper()
+
+        if not self._types_match(expected_type, db_type, db_col):
+            up_queries.append(f'ALTER TABLE "{table_name}" ALTER COLUMN "{field.name}" TYPE {expected_type}')
+            # Restore original type
+            original_type = db_type
+            if db_type == "CHARACTER VARYING" and db_col.character_maximum_length:
+                original_type = f"VARCHAR({db_col.character_maximum_length})"
+            down_queries.append(f'ALTER TABLE "{table_name}" ALTER COLUMN "{field.name}" TYPE {original_type}')
+
+        # --- Nullable change detection ---
+        expected_nullable = field.nullable
+        if expected_nullable != db_col.is_nullable:
+            if not expected_nullable:
+                up_queries.append(f'ALTER TABLE "{table_name}" ALTER COLUMN "{field.name}" SET NOT NULL')
+                down_queries.append(f'ALTER TABLE "{table_name}" ALTER COLUMN "{field.name}" DROP NOT NULL')
+            else:
+                up_queries.append(f'ALTER TABLE "{table_name}" ALTER COLUMN "{field.name}" DROP NOT NULL')
+                down_queries.append(f'ALTER TABLE "{table_name}" ALTER COLUMN "{field.name}" SET NOT NULL')
+
+        # --- Unique constraint detection ---
+        # We check via information_schema in _sync_unique_constraints (called separately)
+        # but for simplicity, we handle it here using a naming convention
+        model_wants_unique = field.unique and not field.primary_key
+        # We'll check unique via the DB column_default pattern — PostgreSQL doesn't store UNI in ColumnInfo
+        # So we do a separate pass below
+
+        return up_queries, down_queries
+
+    async def _sync_unique_constraints(self, model: Type[PostgreSQLModel]) -> Tuple[List[str], List[str]]:
+        """Detect added/removed UNIQUE constraints on existing columns."""
+        table_name = model.__table__
+        
+        # Query existing unique constraints
+        sql = """
+            SELECT kcu.column_name, tc.constraint_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name
+            WHERE tc.constraint_type = 'UNIQUE'
+              AND tc.table_name = $1
+              AND tc.constraint_name LIKE 'uq_%'
+        """
+        rows = await self._pool.fetch_all(sql, [table_name])
+        existing_uniques = {row["column_name"]: row["constraint_name"] for row in rows}
+
+        up_queries = []
+        down_queries = []
+
+        for col_name, field in model._fields.items():
+            model_wants_unique = field.unique and not field.primary_key
+
+            if model_wants_unique and col_name not in existing_uniques:
+                cname = f"uq_{table_name}_{col_name}"[:63]
+                up_queries.append(f'ALTER TABLE "{table_name}" ADD CONSTRAINT "{cname}" UNIQUE ("{col_name}")')
+                down_queries.append(f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{cname}"')
+            elif not model_wants_unique and col_name in existing_uniques:
+                cname = existing_uniques[col_name]
+                up_queries.append(f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{cname}"')
+                down_queries.append(f'ALTER TABLE "{table_name}" ADD CONSTRAINT "{cname}" UNIQUE ("{col_name}")')
+
+        return up_queries, down_queries
+
+    def _get_expected_type(self, field: FieldDefinition) -> str:
+        if field.is_json:
+            return "JSONB"
+        if field.auto_now or field.auto_now_add:
+            return "TIMESTAMP"
+        if field.python_type == str and field.max_length:
+            return f"VARCHAR({field.max_length})"
+        return TYPE_MAP.get(field.python_type, "VARCHAR(255)")
+
+    def _types_match(self, expected: str, db_type: str, db_col: ColumnInfo) -> bool:
+        """Check if the expected type matches the DB type."""
+        expected_upper = expected.upper().replace(" ", "")
+        db_upper = db_type.upper().replace(" ", "")
+
+        # Direct match (ignoring spaces)
+        if expected_upper == db_upper:
+            return True
+
+        # VARCHAR vs CHARACTER VARYING
+        if expected_upper.startswith("VARCHAR"):
+            if db_upper == "CHARACTERVARYING" or db_upper == "VARCHAR":
+                expected_len = expected.upper().replace("VARCHAR(", "").replace(")", "").strip()
+                # If no length specified in expected, assume 255
+                if "(" not in expected.upper(): expected_len = "255"
+                
+                db_len = str(db_col.character_maximum_length) if db_col.character_maximum_length else "255"
+                return expected_len == db_len
+
+        # INTEGER variants
+        if expected_upper in ("INTEGER", "INT", "INT4"):
+            return db_upper in ("INTEGER", "INT", "INT4")
+
+        # BIGINT variants
+        if expected_upper in ("BIGINT", "INT8"):
+            return db_upper in ("BIGINT", "INT8")
+
+        # DOUBLE PRECISION variants
+        if expected_upper in ("DOUBLEPRECISION", "FLOAT8"):
+            return db_upper in ("DOUBLEPRECISION", "FLOAT8")
+
+        # BOOLEAN variants
+        if expected_upper in ("BOOLEAN", "BOOL"):
+            return db_upper in ("BOOLEAN", "BOOL")
+
+        # TIMESTAMP variants
+        if expected_upper == "TIMESTAMP":
+            return db_upper in ("TIMESTAMP", "TIMESTAMPWITHOUTTIMEZONE")
+
+        return False
 
     async def _sync_foreign_keys(self, model: Type[PostgreSQLModel]) -> Tuple[List[str], List[str]]:
         from .registry import registry
@@ -272,6 +414,50 @@ class Migrator:
                     up_queries.append(f'ALTER TABLE "{table_name}" ADD CONSTRAINT "{fk_name}" FOREIGN KEY ("{col_name}") REFERENCES "{target_table}" ("{target_pk}") ON DELETE {on_delete}')
                     down_queries.append(f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{fk_name}"')
                     
+        return up_queries, down_queries
+
+    async def _sync_indexes(self, model: Type[PostgreSQLModel]) -> Tuple[List[str], List[str]]:
+        table_name = model.__table__
+        
+        # Build expected indexes: single-column from index=True fields
+        expected_indexes: dict[str, tuple] = {}
+        for col_name, field in model._fields.items():
+            if field.index:
+                idx_name = f"idx_{table_name}_{col_name}"[:63]
+                expected_indexes[idx_name] = (col_name,)
+        
+        # Add composite indexes from __indexes__
+        for cols in model._composite_indexes:
+            cols_tuple = tuple(cols)
+            idx_name = f"idx_{table_name}_{'_'.join(cols_tuple)}"[:63]
+            expected_indexes[idx_name] = cols_tuple
+        
+        # Query existing ORM-managed indexes
+        sql = """
+            SELECT indexname, indexdef 
+            FROM pg_indexes 
+            WHERE schemaname = 'public' AND tablename = $1 AND indexname LIKE 'idx_%%'
+        """
+        rows = await self._pool.fetch_all(sql, [table_name])
+            
+        existing_indexes = {row["indexname"]: row["indexdef"] for row in rows}
+        
+        up_queries = []
+        down_queries = []
+        
+        # Create missing indexes
+        for idx_name, cols in expected_indexes.items():
+            if idx_name not in existing_indexes:
+                cols_sql = ", ".join([f'"{c}"' for c in cols])
+                up_queries.append(f'CREATE INDEX "{idx_name}" ON "{table_name}" ({cols_sql})')
+                down_queries.append(f'DROP INDEX "{idx_name}"')
+                
+        # Drop removed indexes (use original indexdef for perfect rollback)
+        for idx_name, indexdef in existing_indexes.items():
+            if idx_name not in expected_indexes:
+                up_queries.append(f'DROP INDEX "{idx_name}"')
+                down_queries.append(indexdef)
+                
         return up_queries, down_queries
 
     def _build_column_sql(self, field: FieldDefinition, skip_primary_key: bool = False) -> str:

@@ -111,6 +111,12 @@ class ModelMeta(type):
                 except AttributeError:
                     pass
 
+        # ── Parse composite indexes ───────────────────────────────────────
+        composite_indexes = getattr(cls, "__indexes__", [])
+        if not isinstance(composite_indexes, list):
+            composite_indexes = list(composite_indexes)
+        cls._composite_indexes = composite_indexes
+
         # ── Validate table name ───────────────────────────────────────────
         if not getattr(cls, "__table__", ""):
             raise ConfigurationError(
@@ -239,6 +245,7 @@ class PostgreSQLModel(metaclass=ModelMeta):
     _fields:          ClassVar[Dict[str, FieldDefinition]]    = {}
     _relations:       ClassVar[Dict[str, RelationDefinition]] = {}
     _field_defaults:  ClassVar[Dict[str, Any]]                = {}
+    _composite_indexes: ClassVar[List[tuple]]                 = []
 
     # ── Instance init ─────────────────────────────────────────────────────
 

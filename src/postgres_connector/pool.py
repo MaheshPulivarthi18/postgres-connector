@@ -91,27 +91,42 @@ class ConnectionPool:
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     async def connect(self) -> None:
-        """Create the connection pool. Safe to call multiple times."""
+        """Create the connection pool. Safe to call multiple times. Retries up to 3 times with exponential backoff."""
         async with self._lock:
             if self._connected and self._pool is not None:
                 return
-            try:
-                self._pool = await asyncpg.create_pool(
-                    **self._config,
-                    init=_init_connection,
-                )
-                self._connected = True
-                logger.info(
-                    "✅ PostgreSQL pool connected  host=%s:%s  db=%s  min=%s  max=%s",
-                    self._config["host"], self._config["port"],
-                    self._config["database"],
-                    self._config["min_size"], self._config["max_size"],
-                )
-            except Exception as exc:
-                raise ConnectionPoolError(
-                    f"Cannot connect to PostgreSQL at "
-                    f"{self._config['host']}:{self._config['port']} — {exc}"
-                ) from exc
+
+            max_retries = 3
+            last_exc: Optional[Exception] = None
+
+            for attempt in range(1, max_retries + 1):
+                try:
+                    self._pool = await asyncpg.create_pool(
+                        **self._config,
+                        init=_init_connection,
+                    )
+                    self._connected = True
+                    logger.info(
+                        "✅ PostgreSQL pool connected  host=%s:%s  db=%s  min=%s  max=%s",
+                        self._config["host"], self._config["port"],
+                        self._config["database"],
+                        self._config["min_size"], self._config["max_size"],
+                    )
+                    return
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < max_retries:
+                        wait = 2 ** (attempt - 1)  # 1s, 2s, 4s
+                        logger.warning(
+                            "⚠️  PostgreSQL connect attempt %d/%d failed: %s. Retrying in %ds...",
+                            attempt, max_retries, exc, wait,
+                        )
+                        await asyncio.sleep(wait)
+
+            raise ConnectionPoolError(
+                f"Cannot connect to PostgreSQL at "
+                f"{self._config['host']}:{self._config['port']} after {max_retries} attempts — {last_exc}"
+            ) from last_exc
 
     async def disconnect(self) -> None:
         """Gracefully close all connections in the pool."""

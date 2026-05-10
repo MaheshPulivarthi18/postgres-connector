@@ -281,6 +281,77 @@ class PostgreSQLConnector:
         await instance._trigger_hook("after_create")
         return instance
 
+    # ── create_many ───────────────────────────────────────────────────────
+
+    async def create_many(
+        self,
+        model: Type[PostgreSQLModel],
+        records: List[Dict[str, Any]],
+        session: Optional[Any] = None,
+    ) -> List[PostgreSQLModel]:
+        """
+        Bulk insert multiple rows in a single INSERT statement.
+        Returns a list of created model instances with PKs populated.
+
+        Example:
+            users = await connector.create_many(User, [
+                {"name": "Alice", "email": "alice@example.com"},
+                {"name": "Bob", "email": "bob@example.com"},
+            ])
+        """
+        if not records:
+            return []
+
+        import json
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Normalize all records: apply auto_now_add, collect column set
+        all_columns: set = set()
+        normalized: List[Dict[str, Any]] = []
+        for data in records:
+            row = dict(data)
+            for name, field_def in model._fields.items():
+                if field_def.auto_now_add and name not in row:
+                    row[name] = now
+            # Skip auto-increment PK if not provided
+            for name, field_def in model._fields.items():
+                if field_def.auto_increment and name not in row:
+                    continue
+                if name in row:
+                    all_columns.add(name)
+            normalized.append(row)
+
+        columns = sorted(all_columns)
+        col_sql = ", ".join([f'"{c}"' for c in columns])
+
+        # Build multi-row VALUES
+        param_idx = 0
+        all_params: List[Any] = []
+        value_groups: List[str] = []
+        for row in normalized:
+            placeholders = []
+            for col in columns:
+                val = row.get(col)
+                field_def = model._fields.get(col)
+                if field_def and field_def.is_json and not isinstance(val, (str, bytes)) and val is not None:
+                    val = json.dumps(val)
+                param_idx += 1
+                placeholders.append(f"${param_idx}")
+                all_params.append(val)
+            value_groups.append(f"({', '.join(placeholders)})")
+
+        sql = f'INSERT INTO "{model.__table__}" ({col_sql}) VALUES {", ".join(value_groups)} RETURNING *'
+
+        if session:
+            self._pool.log_query(sql, all_params)
+            raw_rows = await session.fetch(sql, *all_params)
+            rows = [dict(r) for r in raw_rows]
+        else:
+            rows = await self._pool.fetch_all(sql, all_params)
+
+        instances = [model._from_row(row) for row in rows]
+        return instances
+
     # ── update_all ────────────────────────────────────────────────────────
 
     async def update_all(
