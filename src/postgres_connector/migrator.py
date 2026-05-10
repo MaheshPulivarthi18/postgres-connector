@@ -287,36 +287,62 @@ class Migrator:
         return up_queries, down_queries
 
     async def _sync_unique_constraints(self, model: Type[PostgreSQLModel]) -> Tuple[List[str], List[str]]:
-        """Detect added/removed UNIQUE constraints on existing columns."""
+        """Detect added/removed UNIQUE constraints (single and composite)."""
         table_name = model.__table__
         
-        # Query existing unique constraints
+        # 1. Build expected unique constraints
+        expected_uniques: Dict[str, Tuple[str, ...]] = {}
+        
+        # Single column unique=True
+        for col_name, field in model._fields.items():
+            if field.unique and not field.primary_key:
+                cname = f"uq_{table_name}_{col_name}"[:63]
+                expected_uniques[cname] = (col_name,)
+                
+        # Composite unique from __unique__
+        for cols in getattr(model, "__unique__", []):
+            cols_tuple = tuple(cols)
+            cname = f"uq_{table_name}_{'_'.join(cols_tuple)}"[:63]
+            expected_uniques[cname] = cols_tuple
+
+        # 2. Query existing unique constraints
         sql = """
-            SELECT kcu.column_name, tc.constraint_name
+            SELECT tc.constraint_name, kcu.column_name
             FROM information_schema.table_constraints tc
             JOIN information_schema.key_column_usage kcu
               ON tc.constraint_name = kcu.constraint_name
             WHERE tc.constraint_type = 'UNIQUE'
               AND tc.table_name = $1
               AND tc.constraint_name LIKE 'uq_%'
+            ORDER BY tc.constraint_name, kcu.ordinal_position
         """
         rows = await self._pool.fetch_all(sql, [table_name])
-        existing_uniques = {row["column_name"]: row["constraint_name"] for row in rows}
+        
+        existing_uniques: Dict[str, List[str]] = {}
+        for row in rows:
+            cname = row["constraint_name"]
+            if cname not in existing_uniques:
+                existing_uniques[cname] = []
+            existing_uniques[cname].append(row["column_name"])
+            
+        existing_uniques_final = {k: tuple(v) for k, v in existing_uniques.items()}
 
         up_queries = []
         down_queries = []
 
-        for col_name, field in model._fields.items():
-            model_wants_unique = field.unique and not field.primary_key
-
-            if model_wants_unique and col_name not in existing_uniques:
-                cname = f"uq_{table_name}_{col_name}"[:63]
-                up_queries.append(f'ALTER TABLE "{table_name}" ADD CONSTRAINT "{cname}" UNIQUE ("{col_name}")')
+        # Add missing constraints
+        for cname, cols in expected_uniques.items():
+            if cname not in existing_uniques_final:
+                cols_sql = ", ".join([f'"{c}"' for c in cols])
+                up_queries.append(f'ALTER TABLE "{table_name}" ADD CONSTRAINT "{cname}" UNIQUE ({cols_sql})')
                 down_queries.append(f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{cname}"')
-            elif not model_wants_unique and col_name in existing_uniques:
-                cname = existing_uniques[col_name]
+
+        # Drop removed constraints
+        for cname, cols in existing_uniques_final.items():
+            if cname not in expected_uniques:
+                cols_sql = ", ".join([f'"{c}"' for c in cols])
                 up_queries.append(f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{cname}"')
-                down_queries.append(f'ALTER TABLE "{table_name}" ADD CONSTRAINT "{cname}" UNIQUE ("{col_name}")')
+                down_queries.append(f'ALTER TABLE "{table_name}" ADD CONSTRAINT "{cname}" UNIQUE ({cols_sql})')
 
         return up_queries, down_queries
 
@@ -376,10 +402,13 @@ class Migrator:
         
         table_name = model.__table__
         
+        # 1. Query existing foreign keys
         sql = """
             SELECT
+                tc.constraint_name,
                 kcu.column_name,
-                ccu.table_name AS referenced_table_name
+                ccu.table_name AS referenced_table_name,
+                ccu.column_name AS referenced_column_name
             FROM information_schema.table_constraints tc
             JOIN information_schema.key_column_usage kcu
               ON tc.constraint_name = kcu.constraint_name
@@ -387,32 +416,42 @@ class Migrator:
               ON ccu.constraint_name = tc.constraint_name
             WHERE tc.constraint_type = 'FOREIGN KEY'
               AND tc.table_name = $1
+              AND tc.constraint_name LIKE 'fk_%'
         """
         rows = await self._pool.fetch_all(sql, [table_name])
         existing_fks = {row["column_name"]: row for row in rows}
+        
+        # 2. Build expected foreign keys
+        expected_fks = {}
+        for rel_name, rel in model._relations.items():
+            if rel.relation_type == RelationType.BELONGS_TO:
+                target_cls = registry.get(rel.target_model)
+                if not target_cls: continue
+                expected_fks[rel.foreign_key] = {
+                    "target_table": target_cls.__table__,
+                    "target_pk": target_cls._get_primary_key()
+                }
+
         up_queries = []
         down_queries = []
         
-        for rel_name, rel in model._relations.items():
-            if rel.relation_type == RelationType.BELONGS_TO:
-                col_name = rel.foreign_key
-                target_cls = registry.get(rel.target_model)
-                if not target_cls: continue
-                
-                target_table = target_cls.__table__
-                target_pk = target_cls._get_primary_key()
-                
-                if col_name not in existing_fks:
-                    fk_name = f"fk_{table_name}_{col_name}"
-                    if len(fk_name) > 63: fk_name = fk_name[:63]
-                    
-                    field_def = model._fields.get(col_name)
-                    on_delete = "CASCADE"
-                    if field_def and field_def.nullable:
-                        on_delete = "SET NULL"
+        # Create missing FKs
+        for col_name, info in expected_fks.items():
+            if col_name not in existing_fks:
+                fk_name = f"fk_{table_name}_{col_name}"[:63]
+                field_def = model._fields.get(col_name)
+                on_delete = "CASCADE"
+                if field_def and field_def.nullable:
+                    on_delete = "SET NULL"
 
-                    up_queries.append(f'ALTER TABLE "{table_name}" ADD CONSTRAINT "{fk_name}" FOREIGN KEY ("{col_name}") REFERENCES "{target_table}" ("{target_pk}") ON DELETE {on_delete}')
-                    down_queries.append(f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{fk_name}"')
+                up_queries.append(f'ALTER TABLE "{table_name}" ADD CONSTRAINT "{fk_name}" FOREIGN KEY ("{col_name}") REFERENCES "{info["target_table"]}" ("{info["target_pk"]}") ON DELETE {on_delete}')
+                down_queries.append(f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{fk_name}"')
+                
+        # Drop removed FKs
+        for col_name, row in existing_fks.items():
+            if col_name not in expected_fks:
+                fk_name = row["constraint_name"]
+                up_queries.append(f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{fk_name}"')
                     
         return up_queries, down_queries
 

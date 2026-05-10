@@ -127,6 +127,17 @@ class RelationResolver:
         rel_def: RelationDefinition = parent_model._relations[rel_name]
         target_cls = registry.get(rel_def.target_model)
 
+        # Ensure scope exists
+        if not scope.scope:
+            scope.scope = FilterOptions()
+
+        # Apply soft delete filter to target model if applicable
+        if "deleted_at" in target_cls._fields:
+            if not scope.scope.where:
+                scope.scope.where = {}
+            if "deleted_at" not in scope.scope.where:
+                scope.scope.where["deleted_at"] = None
+
         if rel_def.relation_type == RelationType.HAS_MANY:
             await self._has_many(parents, scope, rel_def, target_cls)
 
