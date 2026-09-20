@@ -126,10 +126,17 @@ async def _translate_db_errors(timeout: Optional[float] = None):
     asyncpg's TimeoutError doesn't carry the configured value) so the
     error message is useful even at call sites with no per-call override,
     which still pass through whatever the pool's configured default is.
+
+    Catches `asyncio.TimeoutError` explicitly alongside the builtin
+    `TimeoutError` — they're the same object on Python 3.11+, but on 3.8-3.10
+    `asyncio.TimeoutError` is a distinct class (a `concurrent.futures.
+    TimeoutError` subclass, not an `OSError`/`TimeoutError` one), so
+    `except TimeoutError` alone silently misses it there and a raw
+    `asyncio.TimeoutError` leaks out instead of `QueryTimeoutError`.
     """
     try:
         yield
-    except TimeoutError as exc:
+    except (TimeoutError, asyncio.TimeoutError) as exc:
         raise QueryTimeoutError(f"Query exceeded its timeout ({timeout}s)", timeout=timeout) from exc
     except asyncpg.exceptions.IntegrityConstraintViolationError as exc:  # type: ignore[union-attr]
         raise _translate_integrity_error(exc) from exc
