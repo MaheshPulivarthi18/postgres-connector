@@ -12,10 +12,11 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Optional, Dict, List
+from typing import Any, AsyncGenerator, Callable, Optional, Dict, List, Tuple
 
 try:
     import asyncpg
@@ -71,17 +72,28 @@ class ConnectionPool:
         minsize:         int   = 2,
         maxsize:         int   = 10,
         connect_timeout: float = 10.0,
+        command_timeout: Optional[float] = 30.0,
         echo:            bool  = False,
     ):
+        # Plain connection params — reused for one-off dedicated connections
+        # (LISTEN needs a connection held open outside the pool; a pooled
+        # connection would be recycled for other queries while "listening").
+        self._connect_kwargs: Dict[str, Any] = {
+            "host":     host,
+            "port":     port,
+            "user":     user,
+            "password": password,
+            "database": database,
+        }
         self._config: Dict[str, Any] = {
-            "host":             host,
-            "port":             port,
-            "user":             user,
-            "password":         password,
-            "database":         database,
+            **self._connect_kwargs,
             "min_size":         minsize,
             "max_size":         maxsize,
-            "command_timeout":  connect_timeout,
+            # `timeout` = time allowed to establish a connection.
+            # `command_timeout` = default per-query timeout on connections
+            # from this pool (overridable per-call — see fetch_all/execute).
+            "timeout":          connect_timeout,
+            "command_timeout":  command_timeout,
         }
         self._echo:  bool                       = echo
         self._pool:  Optional["asyncpg.Pool"]   = None
@@ -146,23 +158,27 @@ class ConnectionPool:
 
     # ── Query helpers ─────────────────────────────────────────────────────
 
-    async def fetch_all(self, sql: str, params: List[Any]) -> List[Dict[str, Any]]:
-        """Execute a SELECT and return all rows as a list of dicts."""
+    async def fetch_all(self, sql: str, params: List[Any], timeout: Optional[float] = None) -> List[Dict[str, Any]]:
+        """
+        Execute a SELECT and return all rows as a list of dicts.
+        `timeout` overrides this pool's default command_timeout for just
+        this call; leave it None to use the configured default.
+        """
         self._assert_connected()
         self.log_query(sql, params)
         async with self._pool.acquire() as conn:  # type: ignore[union-attr]
-            rows = await conn.fetch(sql, *params)
+            rows = await conn.fetch(sql, *params, timeout=timeout)
             return [dict(r) for r in rows]
 
-    async def fetch_one(self, sql: str, params: List[Any]) -> Optional[Dict[str, Any]]:
+    async def fetch_one(self, sql: str, params: List[Any], timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """Execute a SELECT and return the first row as a dict, or None."""
         self._assert_connected()
         self.log_query(sql, params)
         async with self._pool.acquire() as conn:  # type: ignore[union-attr]
-            row = await conn.fetchrow(sql, *params)
+            row = await conn.fetchrow(sql, *params, timeout=timeout)
             return dict(row) if row else None
 
-    async def execute(self, sql: str, params: List[Any]) -> int:
+    async def execute(self, sql: str, params: List[Any], timeout: Optional[float] = None) -> int:
         """
         Execute a DML/DDL statement and return the affected row count.
         For DDL (CREATE TABLE, ALTER TABLE), returns 0.
@@ -170,20 +186,79 @@ class ConnectionPool:
         self._assert_connected()
         self.log_query(sql, params)
         async with self._pool.acquire() as conn:  # type: ignore[union-attr]
-            result: str = await conn.execute(sql, *params)
+            result: str = await conn.execute(sql, *params, timeout=timeout)
             # asyncpg returns strings like "UPDATE 3", "DELETE 2", "INSERT 0 1"
             try:
                 return int(result.split()[-1])
             except (ValueError, IndexError):
                 return 0
 
+    # ── LISTEN / NOTIFY ──────────────────────────────────────────────────────
+
+    async def notify(self, channel: str, payload: str = "") -> None:
+        """Send a NOTIFY on `channel` using a pooled connection (one-shot, safe to pool)."""
+        self._assert_connected()
+        async with self._pool.acquire() as conn:  # type: ignore[union-attr]
+            await conn.execute("SELECT pg_notify($1, $2)", channel, payload)
+
+    async def listen(self, channel: str, callback: Callable[[str], Any]) -> Tuple["asyncpg.Connection", Callable]:
+        """
+        Start listening on `channel` using a DEDICATED connection outside
+        the pool — LISTEN registers state on a specific connection, and a
+        pooled connection would be handed to other queries while it's
+        supposed to be listening, silently breaking delivery.
+
+        `callback` receives just the payload (str); it may be a plain
+        function or a coroutine function.
+
+        Returns (connection, wrapped_callback) — hang onto both, they're
+        needed to unlisten() later.
+        """
+        self._assert_connected()
+        conn = await asyncpg.connect(**self._connect_kwargs)
+        await _init_connection(conn)
+
+        def _wrapped(_connection, _pid, _channel, payload) -> None:
+            try:
+                result = callback(payload)
+                if inspect.isawaitable(result):
+                    asyncio.ensure_future(result)
+            except Exception:
+                logger.exception("Error in LISTEN callback for channel '%s'", channel)
+
+        await conn.add_listener(channel, _wrapped)
+        logger.info("Listening on channel '%s' via a dedicated connection.", channel)
+        return conn, _wrapped
+
+    async def unlisten(self, channel: str, conn: "asyncpg.Connection", wrapped: Callable) -> None:
+        """Stop listening and release the dedicated connection opened by listen()."""
+        try:
+            if not conn.is_closed():
+                await conn.remove_listener(channel, wrapped)
+        finally:
+            await conn.close()
+
     # ── Transaction ───────────────────────────────────────────────────────
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncGenerator["asyncpg.Connection", None]:
+    async def transaction(
+        self,
+        *,
+        isolation:  Optional[str] = None,
+        readonly:   bool = False,
+        deferrable: bool = False,
+    ) -> AsyncGenerator["asyncpg.Connection", None]:
         """
         Yield a connection with an open transaction.
         Commits on success, rolls back on any exception.
+
+        Args:
+            isolation:  One of "read_committed", "repeatable_read",
+                        "serializable" (asyncpg names). None uses the
+                        server default (read committed).
+            readonly:   Mark the transaction READ ONLY.
+            deferrable: Mark the transaction DEFERRABLE (only meaningful
+                        for serializable + readonly).
 
         Usage:
             async with pool.transaction() as conn:
@@ -193,7 +268,7 @@ class ConnectionPool:
         """
         self._assert_connected()
         async with self._pool.acquire() as conn:  # type: ignore[union-attr]
-            async with conn.transaction():
+            async with conn.transaction(isolation=isolation, readonly=readonly, deferrable=deferrable):
                 yield conn
 
     # ── Status ────────────────────────────────────────────────────────────

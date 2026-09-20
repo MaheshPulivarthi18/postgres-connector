@@ -43,6 +43,14 @@ _OPERATORS: Dict[str, str] = {
     "contains": "@>",
 }
 
+# FilterOptions.lock value → trailing SQL clause
+_LOCK_MODES: Dict[str, str] = {
+    "update":             "FOR UPDATE",
+    "update_nowait":      "FOR UPDATE NOWAIT",
+    "update_skip_locked": "FOR UPDATE SKIP LOCKED",
+    "share":              "FOR SHARE",
+}
+
 
 class QueryBuilder:
     """
@@ -96,6 +104,7 @@ class QueryBuilder:
             self._order_clause(opts.order),
             self._limit_clause(opts.limit),
             self._offset_clause(opts.skip),
+            self._lock_clause(opts.lock),
         ]
         return self._join(parts), list(self._params)
 
@@ -165,16 +174,15 @@ class QueryBuilder:
     ) -> Tuple[str, List[Any]]:
         self._params = []
         self._param_idx = 0
-        import json
 
-        serialized_data = {}
-        for k, v in data.items():
+        # NOTE: JSON/JSONB values are NOT pre-serialized here — the
+        # connection-level type codec registered in pool.py's
+        # _init_connection() already calls json.dumps() on the way to the
+        # wire. Serializing here too double-encodes the value (it gets
+        # stored as a JSON *string* scalar instead of a JSON object/array).
+        for k in data:
             self._validate_field(k)
-            field_def = self.fields.get(k)
-            if field_def and field_def.is_json and not isinstance(v, (str, bytes)) and v is not None:
-                serialized_data[k] = json.dumps(v)
-            else:
-                serialized_data[k] = v
+        serialized_data = dict(data)
 
         cols  = ", ".join(f'"{k}"' for k in serialized_data)
         marks = self._placeholders(list(serialized_data.values()))
@@ -187,10 +195,60 @@ class QueryBuilder:
 
         return sql, list(self._params)
 
+    def build_upsert(
+        self,
+        data:            Dict[str, Any],
+        conflict_target: List[str],
+        update_fields:   Optional[List[str]] = None,
+    ) -> Tuple[str, List[Any]]:
+        """
+        INSERT ... ON CONFLICT (conflict_target) DO UPDATE SET ... RETURNING *
+
+        `conflict_target` must have a unique or primary-key constraint in
+        the database (Postgres requires this to detect the conflict).
+
+        `update_fields` defaults to every column in `data` except
+        `conflict_target` itself. Pass `update_fields=[]` to make it
+        `ON CONFLICT DO NOTHING` instead — in that case RETURNING yields no
+        row when an existing row already satisfied the conflict.
+        """
+        if not data:
+            raise QueryError("UPSERT requires at least one field to insert.")
+        if not conflict_target:
+            raise QueryError("UPSERT requires conflict_target (the unique/PK column(s) to detect a conflict on).")
+
+        self._params = []
+        self._param_idx = 0
+
+        for k in data:
+            self._validate_field(k)
+        for k in conflict_target:
+            self._validate_field(k)
+
+        cols          = ", ".join(f'"{k}"' for k in data)
+        marks         = self._placeholders(list(data.values()))
+        conflict_cols = ", ".join(f'"{k}"' for k in conflict_target)
+        sql = f'INSERT INTO "{self.table}" ({cols}) VALUES ({marks}) ON CONFLICT ({conflict_cols})'
+
+        if update_fields is None:
+            update_fields = [k for k in data if k not in conflict_target]
+        for k in update_fields:
+            self._validate_field(k)
+
+        if not update_fields:
+            sql += ' DO NOTHING'
+        else:
+            set_clause = ", ".join(f'"{k}" = EXCLUDED."{k}"' for k in update_fields)
+            sql += f' DO UPDATE SET {set_clause}'
+
+        sql += ' RETURNING *'
+        return sql, list(self._params)
+
     def build_update(
         self,
-        where: Dict[str, Any],
-        data:  Dict[str, Any],
+        where:         Dict[str, Any],
+        data:          Dict[str, Any],
+        returning_all: bool = False,
     ) -> Tuple[str, List[Any]]:
         if not data:
             raise QueryError("UPDATE requires at least one field to set.")
@@ -199,19 +257,19 @@ class QueryBuilder:
 
         self._params = []
         self._param_idx = 0
-        import json
 
+        # See build_insert(): JSON/JSONB values are left as native Python
+        # objects — the connection-level type codec handles serialization.
         set_parts = []
         for k, v in data.items():
             self._validate_field(k)
-            field_def = self.fields.get(k)
-            if field_def and field_def.is_json and not isinstance(v, (str, bytes)) and v is not None:
-                v = json.dumps(v)
             set_parts.append(f'"{k}" = {self._p(v)}')
 
         set_clause = ", ".join(set_parts)
         where_sql  = self._build_where_dict(where)
         sql = f'UPDATE "{self.table}" SET {set_clause} WHERE {where_sql}'
+        if returning_all:
+            sql += ' RETURNING *'
         return sql, list(self._params)
 
     def build_delete(self, where: Dict[str, Any]) -> Tuple[str, List[Any]]:
@@ -231,6 +289,23 @@ class QueryBuilder:
             where_sql = self._build_where_dict(where)
             if where_sql:
                 sql += f" WHERE {where_sql}"
+        return sql, list(self._params)
+
+    def build_exists(self, where: Optional[Dict[str, Any]] = None) -> Tuple[str, List[Any]]:
+        """
+        SELECT EXISTS(SELECT 1 FROM "table" WHERE ...) AS "_exists"
+
+        Cheaper than build_count() for a plain existence check — Postgres
+        can stop at the first match instead of counting every row.
+        """
+        self._params = []
+        self._param_idx = 0
+        sql = f'SELECT EXISTS(SELECT 1 FROM "{self.table}"'
+        if where:
+            where_sql = self._build_where_dict(where)
+            if where_sql:
+                sql += f" WHERE {where_sql}"
+        sql += ') AS "_exists"'
         return sql, list(self._params)
 
     # ── Clause builders ───────────────────────────────────────────────────
@@ -349,6 +424,13 @@ class QueryBuilder:
         if skip < 0:
             raise QueryError("OFFSET (skip) must be a non-negative integer.")
         return f"OFFSET {int(skip)}"
+
+    def _lock_clause(self, lock: Optional[str]) -> str:
+        if lock is None:
+            return ""
+        if lock not in _LOCK_MODES:
+            raise QueryError(f"Unknown lock mode '{lock}'. Use one of: {sorted(_LOCK_MODES)}")
+        return _LOCK_MODES[lock]
 
     # ── Utilities ─────────────────────────────────────────────────────────
 

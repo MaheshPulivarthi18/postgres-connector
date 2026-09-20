@@ -3,6 +3,8 @@ Custom exceptions for the PostgreSQL Connector.
 All connector errors inherit from ConnectorError for easy catch-all handling.
 """
 
+from typing import Optional
+
 
 class ConnectorError(Exception):
     """Base exception for all connector errors."""
@@ -34,6 +36,16 @@ class ModelNotRegisteredError(ConnectorError):
             f"Make sure it subclasses PostgreSQLModel and is imported before use."
         )
         self.model_name = model_name
+
+
+class ProcedureNotRegisteredError(ConnectorError):
+    """Raised when calling a stored procedure/function by name that hasn't been registered."""
+    def __init__(self, proc_name: str):
+        super().__init__(
+            f"Procedure '{proc_name}' is not registered. "
+            f"Make sure it's declared with Procedure(...) and imported before use."
+        )
+        self.proc_name = proc_name
 
 
 class RelationNotDefinedError(ConnectorError):
@@ -70,3 +82,62 @@ class ConfigurationError(ConnectorError):
 class TransactionError(ConnectorError):
     """Raised when a transaction fails."""
     pass
+
+
+class QueryTimeoutError(ConnectorError):
+    """
+    Raised when a query exceeds its timeout (either the connector-wide
+    `command_timeout` default, or a per-call `timeout=` override on
+    raw()/raw_execute()/call()) — instead of a bare `TimeoutError`, which
+    could be confused with an unrelated asyncio timeout elsewhere in the
+    app. A slow/hung query is deliberately NOT retried automatically (see
+    fault tolerance docs) — retrying an already-slow query risks piling
+    more load onto an already-struggling database.
+    """
+    def __init__(self, message: str, *, timeout: Optional[float] = None):
+        super().__init__(message)
+        self.timeout = timeout
+
+
+class IntegrityError(ConnectorError):
+    """
+    Base class for a write rejected by a database constraint. Raised
+    instead of a raw asyncpg exception so a FastAPI app can map DB errors
+    to HTTP responses in one place (an exception handler per subclass)
+    rather than every route hand-catching driver internals.
+
+    Carries the underlying constraint details Postgres reported — useful
+    for building an error message or deciding which field to blame in a
+    response — and chains the original asyncpg exception via `__cause__`
+    if you need the raw SQLSTATE/message.
+    """
+    def __init__(
+        self,
+        message:    str,
+        *,
+        constraint: Optional[str] = None,
+        table:      Optional[str] = None,
+        column:     Optional[str] = None,
+        detail:     Optional[str] = None,
+    ):
+        super().__init__(message)
+        self.constraint = constraint
+        self.table      = table
+        self.column     = column
+        self.detail     = detail
+
+
+class UniqueConstraintError(IntegrityError):
+    """A write violated a UNIQUE or PRIMARY KEY constraint (e.g. a duplicate email)."""
+
+
+class ForeignKeyConstraintError(IntegrityError):
+    """A write referenced a row that doesn't exist, or tried to delete/update a still-referenced row."""
+
+
+class NotNullConstraintError(IntegrityError):
+    """A write left a required (NOT NULL) column empty."""
+
+
+class CheckConstraintError(IntegrityError):
+    """A write violated a CHECK constraint."""

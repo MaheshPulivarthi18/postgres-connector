@@ -30,25 +30,34 @@ Quick start:
     })
 """
 
-__version__ = "1.0.0"
+__version__ = "1.2.0"
 
-from .connector import PostgreSQLConnector
-from .model     import PostgreSQLModel
-from .fields    import Field, Relation, JSONField
-from .migrator  import Migrator
-from .types     import FilterOptions, IncludeScope, RelationType
-from .registry  import registry
+from .connector   import PostgreSQLConnector
+from .model       import PostgreSQLModel
+from .fields      import Field, Relation, JSONField
+from .migrator    import Migrator
+from .procedures  import Procedure, procedures
+from .transaction import TransactionContext
+from .types       import FilterOptions, IncludeScope, RelationType
+from .registry    import registry
 
 from .exceptions import (
     ConnectorError,
     RelationNotLoadedError,
     ModelNotRegisteredError,
+    ProcedureNotRegisteredError,
     RelationNotDefinedError,
     SchemaError,
     QueryError,
     ConnectionPoolError,
     ConfigurationError,
     TransactionError,
+    QueryTimeoutError,
+    IntegrityError,
+    UniqueConstraintError,
+    ForeignKeyConstraintError,
+    NotNullConstraintError,
+    CheckConstraintError,
 )
 
 __all__ = [
@@ -60,6 +69,10 @@ __all__ = [
     "Relation",
     "JSONField",
     "Migrator",
+    "TransactionContext",
+    # Stored procedures/functions
+    "Procedure",
+    "procedures",
     # Types / DSL
     "FilterOptions",
     "IncludeScope",
@@ -70,10 +83,17 @@ __all__ = [
     "ConnectorError",
     "RelationNotLoadedError",
     "ModelNotRegisteredError",
+    "ProcedureNotRegisteredError",
     "RelationNotDefinedError",
     "SchemaError",
     "QueryError",
     "ConnectionPoolError",
     "ConfigurationError",
     "TransactionError",
+    "QueryTimeoutError",
+    "IntegrityError",
+    "UniqueConstraintError",
+    "ForeignKeyConstraintError",
+    "NotNullConstraintError",
+    "CheckConstraintError",
 ]
