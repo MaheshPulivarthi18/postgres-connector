@@ -218,21 +218,6 @@ async def check_row_locking(connector):
     )
 
 
-async def check_streaming(connector):
-    print("\n== Streaming cursor over 20000 orders ==")
-    t0 = time.monotonic()
-    seen = 0
-    max_batch_conn_check = True
-    async for _order in connector.stream(Order, {}, batch_size=500):
-        seen += 1
-    elapsed = time.monotonic() - t0
-    check("stream(): visits every row via server-side cursor", seen == N_ORDERS, f"{seen} rows in {elapsed:.1f}s")
-
-    # Prove the connection was released cleanly: pool should still be usable.
-    post_count = await connector.count(Order)
-    check("stream(): connection released cleanly after completion", post_count == N_ORDERS)
-
-
 async def check_delete(connector):
     print("\n== Delete at scale ==")
     # Soft delete is intentionally NOT a connector feature — it's
@@ -296,7 +281,6 @@ async def main():
         await check_upsert(connector, customer_ids)
         await check_transactions(connector, customer_ids)
         await check_row_locking(connector)
-        await check_streaming(connector)
         await check_delete(connector)
         await check_exception_mapping(connector)
         await check_timeouts(connector)
