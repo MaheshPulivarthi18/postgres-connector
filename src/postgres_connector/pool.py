@@ -16,7 +16,7 @@ import inspect
 import json
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Callable, Optional, Dict, List, Tuple
+from typing import Any, AsyncGenerator, Callable, Optional, Dict, List, Set, Tuple
 
 try:
     import asyncpg
@@ -218,20 +218,41 @@ class ConnectionPool:
         conn = await asyncpg.connect(**self._connect_kwargs)
         await _init_connection(conn)
 
+        # Strong references to in-flight async callbacks: asyncio only keeps
+        # weak ones, so an unreferenced task can be garbage-collected mid-run.
+        tasks: Set["asyncio.Future[Any]"] = set()
+
+        def _on_task_done(task: "asyncio.Future[Any]") -> None:
+            tasks.discard(task)
+            if not task.cancelled() and task.exception() is not None:
+                logger.error(
+                    "Error in LISTEN callback for channel '%s'", channel,
+                    exc_info=task.exception(),
+                )
+
         def _wrapped(_connection, _pid, _channel, payload) -> None:
             try:
                 result = callback(payload)
                 if inspect.isawaitable(result):
-                    asyncio.ensure_future(result)
+                    task = asyncio.ensure_future(result)
+                    tasks.add(task)
+                    task.add_done_callback(_on_task_done)
             except Exception:
                 logger.exception("Error in LISTEN callback for channel '%s'", channel)
 
+        _wrapped._tasks = tasks  # type: ignore[attr-defined] — read by unlisten()
         await conn.add_listener(channel, _wrapped)
         logger.info("Listening on channel '%s' via a dedicated connection.", channel)
         return conn, _wrapped
 
     async def unlisten(self, channel: str, conn: "asyncpg.Connection", wrapped: Callable) -> None:
-        """Stop listening and release the dedicated connection opened by listen()."""
+        """
+        Stop listening and release the dedicated connection opened by
+        listen(). Async callbacks still running for this listener are
+        cancelled.
+        """
+        for task in list(getattr(wrapped, "_tasks", ())):
+            task.cancel()
         try:
             if not conn.is_closed():
                 await conn.remove_listener(channel, wrapped)

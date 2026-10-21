@@ -82,8 +82,15 @@ class Migrator:
             return
 
         up_queries, _ = await self._get_queries(db_name)
-        for q in up_queries:
-            await self._pool.execute(q, [])
+        if not up_queries:
+            return
+        # One transaction for the whole sync (PostgreSQL DDL is
+        # transactional): a failing statement rolls back the ones before
+        # it instead of leaving the schema half-migrated.
+        async with self._pool.transaction() as conn:
+            for q in up_queries:
+                self._pool.log_query(q)
+                await conn.execute(q)
 
     async def generate_migrations(self, directory: str) -> Optional[str]:
         db_name = self._pool._config.get("database")
@@ -141,12 +148,8 @@ class Migrator:
                 with open(filepath, "r") as file:
                     sql_content = file.read()
                     
-                statements = [s.strip() for s in sql_content.split(';') if s.strip()]
-                
                 async with self._pool.transaction() as conn:
-                    for stmt in statements:
-                        self._pool.log_query(stmt)
-                        await conn.execute(stmt)
+                    await self._run_script(conn, sql_content)
                     await conn.execute("INSERT INTO schema_migrations (version) VALUES ($1)", version)
                         
                 logger.info(f"Applied migration: {version}")
@@ -179,16 +182,25 @@ class Migrator:
         with open(filepath, "r") as file:
             sql_content = file.read()
 
-        statements = [s.strip() for s in sql_content.split(';') if s.strip()]
-
         async with self._pool.transaction() as conn:
-            for stmt in statements:
-                self._pool.log_query(stmt)
-                await conn.execute(stmt)
+            await self._run_script(conn, sql_content)
             await conn.execute("DELETE FROM schema_migrations WHERE version = $1", version)
 
         logger.info(f"Rolled back migration: {version}")
         return 1
+
+    async def _run_script(self, conn: Any, sql_content: str) -> None:
+        """
+        Run a migration file exactly as written. A parameterless execute()
+        goes through Postgres's simple-query protocol, which accepts many
+        statements at once and parses them itself — so `;` inside function
+        bodies, string literals and comments is handled correctly (splitting
+        the text on ';' here would cut those statements apart).
+        """
+        if not sql_content.strip():
+            return
+        self._pool.log_query(sql_content)
+        await conn.execute(sql_content)
 
     async def _get_db_schema(self, db_name: str) -> Dict[str, Dict[str, ColumnInfo]]:
         sql = """
@@ -524,7 +536,9 @@ class Migrator:
         elif field.primary_key and skip_primary_key: parts.append("NOT NULL")
         elif not field.nullable: parts.append("NOT NULL")
 
-        if field.unique and not field.primary_key: parts.append("UNIQUE")
+        # No inline UNIQUE here: _sync_unique_constraints() adds the managed
+        # "uq_<table>_<col>" constraint for unique=True columns. An inline one
+        # as well would give every unique column two identical indexes.
 
         if field.is_json: pass
         elif field.auto_now_add: parts.append("DEFAULT CURRENT_TIMESTAMP")
