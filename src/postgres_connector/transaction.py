@@ -157,13 +157,6 @@ class TransactionContext:
     async def sync_procedures(self) -> int:
         return await self._connector.sync_procedures(session=self._conn)
 
-    async def notify(self, channel: str, payload: str = "") -> None:
-        """
-        Send a NOTIFY as part of this transaction — delivered to listeners
-        only once the transaction commits, dropped if it rolls back.
-        """
-        return await self._connector.notify(channel, payload, session=self._conn)
-
     # ── Nested transactions (savepoints) ────────────────────────────────────
 
     def begin(

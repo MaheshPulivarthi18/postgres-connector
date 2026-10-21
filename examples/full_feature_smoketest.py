@@ -255,27 +255,6 @@ async def check_procedures(connector):
     check("call(): matches a direct COUNT(*) on real data", proc_result == row["n"], f"proc={proc_result} direct={row['n']}")
 
 
-async def check_pubsub(connector):
-    print("\n== Pub/Sub (LISTEN/NOTIFY) ==")
-    received = asyncio.Event()
-    box = {}
-
-    def on_message(payload):
-        box["payload"] = payload
-        received.set()
-
-    stop = await connector.listen("smoke_channel", on_message)
-    try:
-        await connector.notify("smoke_channel", "hello from the large dataset run")
-        try:
-            await asyncio.wait_for(received.wait(), timeout=2)
-            check("listen()/notify(): delivers a real notification", box.get("payload") == "hello from the large dataset run")
-        except asyncio.TimeoutError:
-            check("listen()/notify(): delivers a real notification", False, "timed out waiting for delivery")
-    finally:
-        await stop()
-
-
 async def check_delete(connector):
     print("\n== Delete at scale ==")
     # Soft delete is intentionally NOT a connector feature — it's
@@ -341,7 +320,6 @@ async def main():
         await check_row_locking(connector)
         await check_streaming(connector)
         await check_procedures(connector)
-        await check_pubsub(connector)
         await check_delete(connector)
         await check_exception_mapping(connector)
         await check_timeouts(connector)

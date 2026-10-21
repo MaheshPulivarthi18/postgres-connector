@@ -12,11 +12,10 @@ Features:
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Callable, Optional, Dict, List, Set, Tuple
+from typing import Any, AsyncGenerator, Optional, Dict, List
 
 try:
     import asyncpg
@@ -75,9 +74,7 @@ class ConnectionPool:
         command_timeout: Optional[float] = 30.0,
         echo:            bool  = False,
     ):
-        # Plain connection params — reused for one-off dedicated connections
-        # (LISTEN needs a connection held open outside the pool; a pooled
-        # connection would be recycled for other queries while "listening").
+        # Plain connection params, kept separately from the pool-only options.
         self._connect_kwargs: Dict[str, Any] = {
             "host":     host,
             "port":     port,
@@ -192,72 +189,6 @@ class ConnectionPool:
                 return int(result.split()[-1])
             except (ValueError, IndexError):
                 return 0
-
-    # ── LISTEN / NOTIFY ──────────────────────────────────────────────────────
-
-    async def notify(self, channel: str, payload: str = "") -> None:
-        """Send a NOTIFY on `channel` using a pooled connection (one-shot, safe to pool)."""
-        self._assert_connected()
-        async with self._pool.acquire() as conn:  # type: ignore[union-attr]
-            await conn.execute("SELECT pg_notify($1, $2)", channel, payload)
-
-    async def listen(self, channel: str, callback: Callable[[str], Any]) -> Tuple["asyncpg.Connection", Callable]:
-        """
-        Start listening on `channel` using a DEDICATED connection outside
-        the pool — LISTEN registers state on a specific connection, and a
-        pooled connection would be handed to other queries while it's
-        supposed to be listening, silently breaking delivery.
-
-        `callback` receives just the payload (str); it may be a plain
-        function or a coroutine function.
-
-        Returns (connection, wrapped_callback) — hang onto both, they're
-        needed to unlisten() later.
-        """
-        self._assert_connected()
-        conn = await asyncpg.connect(**self._connect_kwargs)
-        await _init_connection(conn)
-
-        # Strong references to in-flight async callbacks: asyncio only keeps
-        # weak ones, so an unreferenced task can be garbage-collected mid-run.
-        tasks: Set["asyncio.Future[Any]"] = set()
-
-        def _on_task_done(task: "asyncio.Future[Any]") -> None:
-            tasks.discard(task)
-            if not task.cancelled() and task.exception() is not None:
-                logger.error(
-                    "Error in LISTEN callback for channel '%s'", channel,
-                    exc_info=task.exception(),
-                )
-
-        def _wrapped(_connection, _pid, _channel, payload) -> None:
-            try:
-                result = callback(payload)
-                if inspect.isawaitable(result):
-                    task = asyncio.ensure_future(result)
-                    tasks.add(task)
-                    task.add_done_callback(_on_task_done)
-            except Exception:
-                logger.exception("Error in LISTEN callback for channel '%s'", channel)
-
-        _wrapped._tasks = tasks  # type: ignore[attr-defined] — read by unlisten()
-        await conn.add_listener(channel, _wrapped)
-        logger.info("Listening on channel '%s' via a dedicated connection.", channel)
-        return conn, _wrapped
-
-    async def unlisten(self, channel: str, conn: "asyncpg.Connection", wrapped: Callable) -> None:
-        """
-        Stop listening and release the dedicated connection opened by
-        listen(). Async callbacks still running for this listener are
-        cancelled.
-        """
-        for task in list(getattr(wrapped, "_tasks", ())):
-            task.cancel()
-        try:
-            if not conn.is_closed():
-                await conn.remove_listener(channel, wrapped)
-        finally:
-            await conn.close()
 
     # ── Transaction ───────────────────────────────────────────────────────
 

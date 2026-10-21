@@ -223,7 +223,6 @@ class PostgreSQLConnector:
         )
         self._resolver = RelationResolver(self._pool)
         self._migrator = Migrator(self._pool)
-        self._listeners: List[Tuple[str, Any, Any]] = []  # (channel, conn, wrapped_callback)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -232,14 +231,7 @@ class PostgreSQLConnector:
         await self._pool.connect()
 
     async def disconnect(self) -> None:
-        """
-        Close all connections, including any dedicated LISTEN connections
-        opened by listen() that weren't explicitly stopped. Call this on
-        app shutdown.
-        """
-        for channel, conn, wrapped in list(self._listeners):
-            await self._pool.unlisten(channel, conn, wrapped)
-        self._listeners.clear()
+        """Close all connections. Call this on app shutdown."""
         await self._pool.disconnect()
 
     async def ping(self) -> bool:
@@ -860,70 +852,6 @@ class PostgreSQLConnector:
         just this call.
         """
         return await self._execute(sql, params, session=session, timeout=timeout)
-
-    # ── LISTEN / NOTIFY ──────────────────────────────────────────────────────
-
-    async def listen(
-        self,
-        channel:  str,
-        callback: Callable[[str], Any],
-    ) -> Callable[[], Awaitable[None]]:
-        """
-        Start listening on a Postgres NOTIFY channel using a dedicated
-        connection — LISTEN registers state on one specific connection, so
-        it can't come from the shared pool (a pooled connection would be
-        handed to other queries while it's supposed to be listening).
-
-        `callback` receives the notification payload (str). It may be a
-        plain function or a coroutine function — both are supported.
-
-        Returns an async `stop()` — call it to stop listening and release
-        the dedicated connection. Any listener not explicitly stopped is
-        automatically cleaned up by `disconnect()`.
-
-        Example:
-            async def on_job_ready(payload):
-                print("new job:", payload)
-
-            stop = await connector.listen("jobs_channel", on_job_ready)
-            ...
-            await stop()
-        """
-        conn, wrapped = await self._pool.listen(channel, callback)
-        entry = (channel, conn, wrapped)
-        self._listeners.append(entry)
-
-        async def stop() -> None:
-            await self._pool.unlisten(channel, conn, wrapped)
-            if entry in self._listeners:
-                self._listeners.remove(entry)
-
-        return stop
-
-    async def notify(
-        self,
-        channel: str,
-        payload: str = "",
-        session: Optional[Any] = None,
-    ) -> None:
-        """
-        Send a NOTIFY on `channel` — every listener (in-process ones
-        registered via `listen()`, or any other Postgres session running
-        `LISTEN channel`) has its callback fire with `payload`.
-
-        Note: NOTIFY is transactional. Sent via `session=` (or `tx.notify(...)`
-        inside `begin()`/`run_transaction()`), the notification is only
-        delivered once that transaction COMMITS — and silently dropped if
-        it rolls back. This is usually what you want: notify listeners only
-        once the data they'd go read is actually visible.
-
-        Example:
-            await connector.notify("jobs_channel", json.dumps({"job_id": 42}))
-        """
-        if session:
-            await session.execute("SELECT pg_notify($1, $2)", channel, payload)
-        else:
-            await self._pool.notify(channel, payload)
 
     # ── Stored procedures / functions ───────────────────────────────────────
 

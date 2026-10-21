@@ -21,7 +21,6 @@ Built on [`asyncpg`](https://github.com/MagicStack/asyncpg) — the fastest Post
 - **Row locking** — `FOR UPDATE`/`FOR SHARE`/`SKIP LOCKED` in the filter DSL
 - **Stored procedures** — declare once with `Procedure(...)`, call typed everywhere via `connector.call(...)`; `sync_procedures()` creates/replaces them in the DB from your exact SQL
 - **Upsert** — `INSERT ... ON CONFLICT DO UPDATE`/`DO NOTHING` in one round trip
-- **Pub/Sub** — `listen()`/`notify()` wrapping Postgres `LISTEN`/`NOTIFY`, transaction-aware
 - **Streaming** — `stream()` reads large result sets through a server-side cursor, bounded memory
 - **JSONB support** — `JSONField` for dict/list columns with auto serialization
 - **FastAPI ready** — `__json__()` hook for response serialization
@@ -334,8 +333,6 @@ async def claim_next_job(tx):
 job = await connector.run_transaction(claim_next_job)
 ```
 
-Combined with `listen()`/`notify()` (below), this is the full reliable-job-queue pattern — see [`examples/job_queue.py`](examples/job_queue.py) for a complete, runnable demo with multiple concurrent workers.
-
 ## Raw SQL
 
 ```python
@@ -396,32 +393,6 @@ total = await connector.call(add_numbers, a=2, b=3)
 
 `body` is optional and stays that way for procedures you don't want this library managing — those with no `body` are skipped entirely. Write `body` as `CREATE OR REPLACE` so `sync_procedures()` is safe to run repeatedly (e.g. every app startup), the same way `migrate()` is. Deliberately kept separate from `migrate()` — that's schema, this is executable code — and, like `migrate()`, never drops anything for a `Procedure` that's no longer registered.
 
-## Pub/Sub (LISTEN / NOTIFY)
-
-```python
-async def on_job_ready(payload):
-    print("new job:", payload)
-
-stop = await connector.listen("jobs_channel", on_job_ready)
-...
-await connector.notify("jobs_channel", json.dumps({"job_id": 42}))
-...
-await stop()   # or just leave it — disconnect() cleans up any listener you forgot to stop
-```
-
-`listen()` opens a **dedicated connection** outside the pool — Postgres `LISTEN` registers state on one specific connection, so it can never be a connection borrowed from (and returned to) the shared pool. `callback` can be a plain function or a coroutine function; either is supported.
-
-`NOTIFY` is transactional in Postgres: sent via `connector.notify(...)` directly it's delivered immediately, but sent via `tx.notify(...)` inside `begin()`/`run_transaction()` it's only delivered once that transaction **commits** — and silently dropped if it rolls back. This is usually exactly what you want (don't wake up a worker for data that isn't visible yet):
-
-```python
-async def create_job(tx):
-    job = await tx.create(Job, {"status": "pending"})
-    await tx.notify("jobs_channel", str(job.id))   # delivered only after commit
-    return job
-
-await connector.run_transaction(create_job)
-```
-
 ## Debug mode
 
 ```python
@@ -448,7 +419,7 @@ await connector.find(Post, {"where": {"deleted_at": None}})
 
 ## Full-Feature Verification
 
-[`examples/full_feature_smoketest.py`](examples/full_feature_smoketest.py) seeds a large local dataset (5,000 customers, 20,000 orders, 2,000 jobs) and exercises every feature in this README against it end-to-end — bulk `create_many`, the filter DSL, zero-N+1 relation loading, upsert, transactions/savepoints, `SKIP LOCKED` row locking across concurrent workers, streaming cursors, stored procedures, LISTEN/NOTIFY, delete, typed exception mapping, and query timeouts — printing a pass/fail line per feature:
+[`examples/full_feature_smoketest.py`](examples/full_feature_smoketest.py) seeds a large local dataset (5,000 customers, 20,000 orders, 2,000 jobs) and exercises every feature in this README against it end-to-end — bulk `create_many`, the filter DSL, zero-N+1 relation loading, upsert, transactions/savepoints, `SKIP LOCKED` row locking across concurrent workers, streaming cursors, stored procedures, delete, typed exception mapping, and query timeouts — printing a pass/fail line per feature:
 
 ```bash
 DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=postgres DB_PASSWORD=secret DB_NAME=smoketest \
