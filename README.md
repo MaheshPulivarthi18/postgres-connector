@@ -315,6 +315,24 @@ register_exception_handlers(app)
 
 The body is `{"error": "<class name>", "detail": "<message>"}`, plus `constraint`, `table`, `column` and `db_detail` when Postgres reported them. To shape responses differently, register your own handlers with `@app.exception_handler(...)` instead, or after this call to override one class.
 
+### REST filters (`?filter=`)
+
+Clients can send the whole query as one JSON `filter` parameter, LoopBack-style. `FilterParam` parses it, checks keys, fields, operators and relations (at any include depth) against the model, caps `limit`, and documents the parameter in OpenAPI. Bad input is an HTTP 400 with the reason.
+
+```python
+from fastapi import Depends
+from postgres_connector import FilterOptions
+from postgres_connector.fastapi import FilterParam
+
+@app.get("/users")
+async def list_users(filter: FilterOptions = Depends(FilterParam(User, max_limit=100))):
+    return await db.find(User, filter)
+```
+
+`GET /users?filter={"where":{"active":true},"order":["name ASC"],"limit":20,"include":["orders"]}`
+
+Without a `limit`, `max_limit` is used; a larger `limit` is rejected. Pass `max_limit=None` for no cap.
+
 ## Raw SQL
 
 ```python
