@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Optional, Type, Dict, List, TYPE_CHECKING
+from typing import Any, Optional, Type, Dict, List, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     from .pool import ConnectionPool
@@ -135,24 +135,28 @@ def _norm_int(name: str, value: Any) -> Optional[int]:
     return int(value)
 
 
-def _norm_fields(fields: Any) -> Optional[List[str]]:
-    """Normalise the two LoopBack `Fields` shapes to a list of column names.
+def _norm_fields(fields: Any) -> Union[List[str], Dict[str, bool], None]:
+    """Normalise the LoopBack `Fields` shapes, as loopback-datasource-juggler's fieldsToArray does.
 
-    LoopBack accepts `fields` as an array or as `{name: bool}`, where a `false`
-    value excludes the field. The dict was previously iterated by key only, so
-    excluded fields were selected anyway; now only the truthy keys remain.
+    - a list selects those fields; a string selects one field
+    - `{name: bool}` with any true value selects only the true keys
+    - `{name: false, ...}` with only false values selects every field except
+      those; it stays a dict, since only the query builder knows the columns
+    - `{}` selects every field
     """
     if fields is None or isinstance(fields, (list, tuple)):
         return fields
+    if isinstance(fields, str):
+        return [fields]
     if isinstance(fields, dict):
+        if not fields:
+            return None
         selected = [str(name) for name, include in fields.items() if include]
-        if not selected:
-            raise QueryError(
-                "'fields' object selects no field; at least one key must be true."
-            )
-        return selected
+        if selected:
+            return selected
+        return {str(name): False for name in fields}
     raise QueryError(
-        f"'fields' must be a list of names or an object of name: bool, "
+        f"'fields' must be a list of names, a name, or an object of name: bool, "
         f"got {type(fields).__name__}."
     )
 
