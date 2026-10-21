@@ -13,7 +13,9 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+import sys
 from typing import (
     Any, ClassVar, Optional, Type, Union, Dict, List,
     get_args, get_origin,
@@ -23,9 +25,26 @@ from .fields import Field, Relation, _UNSET
 from .types import FieldDefinition, RelationDefinition, RelationType
 from .exceptions import RelationNotLoadedError, ConfigurationError
 
+# `X | None` (PEP 604) has origin types.UnionType rather than typing.Union.
+_UNION_ORIGINS: tuple = (Union,)
+if sys.version_info >= (3, 10):
+    import types as _types
+    _UNION_ORIGINS += (_types.UnionType,)
+
 # Sentinel object — stored on the instance for unloaded relations.
 # Distinct from None so we can detect "never loaded" vs "loaded as None".
 _UNLOADED = object()
+
+
+def _own_annotations(klass: type) -> Dict[str, Any]:
+    """
+    The annotations declared on `klass` itself, never a base class's. (On
+    Python < 3.10, `klass.__annotations__` falls back to a base's dict when
+    `klass` declares none of its own.)
+    """
+    if hasattr(inspect, "get_annotations"):  # 3.10+
+        return inspect.get_annotations(klass)
+    return klass.__dict__.get("__annotations__", {})
 
 
 class ModelMeta(type):
@@ -61,9 +80,16 @@ class ModelMeta(type):
         cls._field_defaults: Dict[str, Any]                = dict(inherited_defaults)
 
         # ── Collect all annotations up the MRO ───────────────────────────
+        # Also remember which class each one came from: a parent model's
+        # Field()/Relation() was already parsed (and removed from that
+        # class) when the parent was created, so re-reading the bare
+        # annotation here would clobber the inherited definition.
         annotations: Dict[str, Any] = {}
+        annotation_owner: Dict[str, type] = {}
         for klass in reversed(cls.__mro__):
-            annotations.update(getattr(klass, "__annotations__", {}))
+            for attr_name, attr_annotation in _own_annotations(klass).items():
+                annotations[attr_name] = attr_annotation
+                annotation_owner[attr_name] = klass
 
         # ── Process each annotation ───────────────────────────────────────
         for attr_name, attr_annotation in annotations.items():
@@ -72,9 +98,16 @@ class ModelMeta(type):
 
             raw_value = namespace.get(attr_name, _UNSET)
 
+            if (
+                raw_value is _UNSET
+                and annotation_owner[attr_name] is not cls
+                and (attr_name in inherited_fields or attr_name in inherited_relations)
+            ):
+                continue  # keep the definition inherited from the parent model
+
             if isinstance(raw_value, Field):
                 # Explicit Field() descriptor
-                python_type = mcs._unwrap_type(attr_annotation)
+                python_type = mcs._unwrap_type(mcs._resolve_annotation(attr_annotation, cls))
                 field_def   = raw_value.to_definition(attr_name, python_type)
                 cls._fields[attr_name] = field_def
 
@@ -89,6 +122,7 @@ class ModelMeta(type):
 
             elif raw_value is _UNSET:
                 # Plain annotation without a descriptor — auto-detect
+                attr_annotation = mcs._resolve_annotation(attr_annotation, cls)
                 if mcs._looks_like_relation(attr_annotation):
                     pass
                 else:
@@ -140,13 +174,34 @@ class ModelMeta(type):
     # ── Type helpers ──────────────────────────────────────────────────────
 
     @staticmethod
+    def _resolve_annotation(annotation: Any, cls: type) -> Any:
+        """
+        Evaluate a string annotation (from `from __future__ import
+        annotations`, or a quoted type) in the model's module, the same way
+        typing.get_type_hints() does — so "datetime" and "Optional[int]"
+        become real types instead of falling back to `str`. Unresolvable
+        strings (forward refs to models not defined yet, names only visible
+        in a function's locals) are returned unchanged.
+        """
+        if not isinstance(annotation, str):
+            return annotation
+        module = sys.modules.get(cls.__module__)
+        globalns = dict(vars(module)) if module else {}
+        try:
+            # Module globals only: the class body would shadow a type with a
+            # same-named field (`date: date = Field()` -> the Field object).
+            return eval(annotation, globalns)  # noqa: S307 — the model's own source
+        except Exception:
+            return annotation
+
+    @staticmethod
     def _unwrap_type(annotation: Any) -> type:
         """Unwrap Optional[X] / Union[X, None] → X. Falls back to str."""
         import typing
         origin = get_origin(annotation)
         args   = get_args(annotation)
 
-        if origin is typing.Union:
+        if origin in _UNION_ORIGINS:
             non_none = [a for a in args if a is not type(None)]
             if non_none:
                 inner = non_none[0]
@@ -173,13 +228,15 @@ class ModelMeta(type):
     def _is_optional(annotation: Any) -> bool:
         import typing
         return (
-            get_origin(annotation) is typing.Union
+            get_origin(annotation) in _UNION_ORIGINS
             and type(None) in get_args(annotation)
         )
 
     @staticmethod
     def _looks_like_relation(annotation: Any) -> bool:
         """Heuristic: list[...] annotations are typically relations."""
+        if isinstance(annotation, str):  # unresolvable, e.g. list["Order"] on 3.8
+            return annotation.replace(" ", "").startswith(("list[", "List["))
         return get_origin(annotation) is list
 
     @staticmethod
@@ -194,10 +251,11 @@ class ModelMeta(type):
         """
         import typing
         if isinstance(annotation, str):
-            if annotation.startswith("list[") and annotation.endswith("]"):
-                inner = annotation[5:-1]
-                return ModelMeta._name_from(inner)
-            return ModelMeta._name_from(annotation)
+            text = annotation.strip().strip("'\"")
+            for prefix in ("list[", "List[", "typing.List[", "Optional[", "typing.Optional["):
+                if text.startswith(prefix) and text.endswith("]"):
+                    return ModelMeta._extract_model_name(text[len(prefix):-1])
+            return ModelMeta._name_from(text)
 
         origin = get_origin(annotation)
         args   = get_args(annotation)
@@ -330,14 +388,19 @@ class PostgreSQLModel(metaclass=ModelMeta):
 
     # ── Hooks ─────────────────────────────────────────────────────────────
 
-    async def _trigger_hook(self, name: str) -> None:
+    async def _trigger_hook(self, name: str, *args: Any) -> None:
         """Helper to invoke an async hook if defined on the instance."""
         hook = getattr(self, name, None)
         if hook and callable(hook):
             if asyncio.iscoroutinefunction(hook):
-                await hook()
+                await hook(*args)
             else:
-                hook()
+                hook(*args)
+
+    @classmethod
+    def _overrides_hook(cls, name: str) -> bool:
+        """True if this model overrides the no-op base implementation of hook `name`."""
+        return getattr(cls, name) is not getattr(PostgreSQLModel, name)
 
     async def before_create(self) -> None:
         """Override in subclass: called before the INSERT query."""
@@ -348,15 +411,22 @@ class PostgreSQLModel(metaclass=ModelMeta):
         pass
 
     async def before_update(self, data: Dict[str, Any]) -> None:
-        """Override in subclass: called before the UPDATE query. Data can be mutated."""
+        """
+        Override in subclass: called by update_by_id() before the UPDATE,
+        on the row as it currently is. `data` (the fields about to be set)
+        can be mutated. Bulk update_all() does not fire hooks.
+        """
         pass
 
     async def after_update(self) -> None:
-        """Override in subclass: called after the UPDATE query."""
+        """Override in subclass: called by update_by_id() on the updated row."""
         pass
 
     async def before_delete(self) -> None:
-        """Override in subclass: called before DELETE query."""
+        """
+        Override in subclass: called by delete_by_id() before the DELETE, on
+        the row about to be deleted. Bulk delete_all() does not fire hooks.
+        """
         pass
 
     # ── Serialization ─────────────────────────────────────────────────────

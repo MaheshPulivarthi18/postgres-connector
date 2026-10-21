@@ -115,8 +115,13 @@ class QueryBuilder:
         opts:       Optional[FilterOptions] = None,
     ) -> Tuple[str, List[Any]]:
         """
-        SELECT * FROM "table" WHERE "fk_field" IN ($1, $2, ...)
+        SELECT * FROM "table" WHERE "fk_field" = ANY($1)
         Used by RelationResolver for batch loading.
+
+        `limit`/`skip` in `opts` apply PER fk value (i.e. per parent), the
+        way an include scope means them — "each user's 5 latest orders",
+        not "5 orders across all users". That's done with a
+        ROW_NUMBER() OVER (PARTITION BY fk) window, still in one query.
         """
         self._params = []
         self._param_idx = 0
@@ -131,14 +136,39 @@ class QueryBuilder:
                 where_parts.append(f"({extra})")
 
         where = "WHERE " + " AND ".join(where_parts)
+        order = self._order_clause(opts.order if opts else None)
 
-        parts = [
-            sql_select,
-            where,
-            self._order_clause(opts.order if opts else None),
-            self._limit_clause(opts.limit if opts else None),
-        ]
-        return self._join(parts), list(self._params)
+        limit = opts.limit if opts else None
+        skip  = (opts.skip if opts else None) or 0
+        if limit is None and not skip:
+            return self._join([sql_select, where, order]), list(self._params)
+
+        if limit is not None and limit < 0:
+            raise QueryError("LIMIT must be a non-negative integer.")
+        if skip < 0:
+            raise QueryError("OFFSET (skip) must be a non-negative integer.")
+
+        # Number each parent's rows in the requested order (primary key as
+        # the tiebreak, so pages are stable), then keep rows skip+1..skip+limit.
+        order_terms = [order[len("ORDER BY "):]] if order else []
+        pk = next((name for name, f in self.fields.items() if f.primary_key), None)
+        if pk:
+            order_terms.append(f'"{self.table}"."{pk}" ASC')
+        window_order = f"ORDER BY {', '.join(order_terms)}" if order_terms else ""
+        cols = self._select_columns(opts.fields if opts else None)
+        numbered = (
+            f'SELECT {cols}, ROW_NUMBER() OVER '
+            f'(PARTITION BY "{self.table}"."{fk_field}" {window_order}) AS "_rn" '
+            f'FROM "{self.table}" {where}'
+        )
+        bounds = [f'"{self.table}"."_rn" > {int(skip)}']
+        if limit is not None:
+            bounds.append(f'"{self.table}"."_rn" <= {int(skip) + int(limit)}')
+        sql = (
+            f'SELECT * FROM ({numbered}) AS "{self.table}" '
+            f'WHERE {" AND ".join(bounds)} ORDER BY "{self.table}"."_rn"'
+        )
+        return sql, list(self._params)
 
     def build_select_by_pk(
         self,
@@ -148,7 +178,9 @@ class QueryBuilder:
     ) -> Tuple[str, List[Any]]:
         """
         SELECT * FROM "table" WHERE "pk_field" IN ($1, $2, ...)
-        Used by RelationResolver for belongsTo batch loading.
+        Used by RelationResolver for belongsTo / hasManyThrough batch loading.
+        `order` is applied; `limit`/`skip` are not — they mean "per parent",
+        which the resolver applies after stitching.
         """
         self._params = []
         self._param_idx = 0
@@ -163,7 +195,7 @@ class QueryBuilder:
                 where_parts.append(f"({extra})")
 
         where = "WHERE " + " AND ".join(where_parts)
-        parts = [sql_select, where]
+        parts = [sql_select, where, self._order_clause(opts.order if opts else None)]
         return self._join(parts), list(self._params)
 
     def build_insert(
@@ -267,6 +299,8 @@ class QueryBuilder:
 
         set_clause = ", ".join(set_parts)
         where_sql  = self._build_where_dict(where)
+        if not where_sql:
+            raise QueryError("UPDATE without a WHERE clause is not allowed. Pass at least {pk: value}.")
         sql = f'UPDATE "{self.table}" SET {set_clause} WHERE {where_sql}'
         if returning_all:
             sql += ' RETURNING *'
@@ -278,6 +312,8 @@ class QueryBuilder:
         self._params = []
         self._param_idx = 0
         where_sql = self._build_where_dict(where)
+        if not where_sql:
+            raise QueryError("DELETE without a WHERE clause is not allowed.")
         sql       = f'DELETE FROM "{self.table}" WHERE {where_sql}'
         return sql, list(self._params)
 
@@ -310,14 +346,15 @@ class QueryBuilder:
 
     # ── Clause builders ───────────────────────────────────────────────────
 
-    def _select_clause(self, fields: Optional[List[str]]) -> str:
+    def _select_columns(self, fields: Optional[List[str]]) -> str:
         if fields:
             for f in fields:
                 self._validate_field(f)
-            cols = ", ".join(f'"{self.table}"."{f}"' for f in fields)
-        else:
-            cols = f'"{self.table}".*'
-        return f'SELECT {cols} FROM "{self.table}"'
+            return ", ".join(f'"{self.table}"."{f}"' for f in fields)
+        return f'"{self.table}".*'
+
+    def _select_clause(self, fields: Optional[List[str]]) -> str:
+        return f'SELECT {self._select_columns(fields)} FROM "{self.table}"'
 
     def _where_clause(self, where: Optional[Dict[str, Any]]) -> str:
         if not where:
@@ -326,24 +363,38 @@ class QueryBuilder:
         return f"WHERE {sql}" if sql else ""
 
     def _build_where_dict(self, where: Dict[str, Any]) -> str:
+        """
+        Returns "" when `where` imposes no condition at all (e.g. `{}` or
+        `{"and": []}`) — callers treat that as "no WHERE clause".
+        """
         parts: List[str] = []
 
         for key, value in where.items():
             if key == "and":
                 if not isinstance(value, list):
                     raise QueryError("'and' clause must be a list of conditions.")
-                sub = " AND ".join(
-                    f"({self._build_where_dict(clause)})" for clause in value
-                )
-                parts.append(f"({sub})")
+                # Empty sub-clauses impose nothing, so they drop out; an
+                # empty list is the empty conjunction (always true).
+                subs = [s for s in (self._build_where_dict(clause) for clause in value) if s]
+                if subs:
+                    parts.append("(" + " AND ".join(f"({s})" for s in subs) + ")")
 
             elif key == "or":
                 if not isinstance(value, list):
                     raise QueryError("'or' clause must be a list of conditions.")
-                sub = " OR ".join(
-                    f"({self._build_where_dict(clause)})" for clause in value
-                )
-                parts.append(f"({sub})")
+                # An empty list is the empty disjunction (matches nothing,
+                # like `inq: []`); an empty member makes the whole OR true.
+                if not value:
+                    parts.append("FALSE")
+                    continue
+                mark = (len(self._params), self._param_idx)
+                subs = [self._build_where_dict(clause) for clause in value]
+                if all(subs):
+                    parts.append("(" + " OR ".join(f"({s})" for s in subs) + ")")
+                else:
+                    # Discarded members must not leave their params behind.
+                    del self._params[mark[0]:]
+                    self._param_idx = mark[1]
 
             elif isinstance(value, dict):
                 self._validate_field(key)

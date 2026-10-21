@@ -32,6 +32,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, AsyncGenerator, Awaitable, Callable, Optional, Type, TypeVar, Union, Dict, List, Tuple
 
 try:
@@ -140,6 +141,21 @@ async def _translate_db_errors(timeout: Optional[float] = None):
         raise QueryTimeoutError(f"Query exceeded its timeout ({timeout}s)", timeout=timeout) from exc
     except asyncpg.exceptions.IntegrityConstraintViolationError as exc:  # type: ignore[union-attr]
         raise _translate_integrity_error(exc) from exc
+
+
+def _value_matches_type(value: Any, python_type: type) -> bool:
+    """
+    isinstance(), adjusted for numbers the way Python itself treats them:
+    a `float` field accepts int and Decimal too (asyncpg encodes both into
+    DOUBLE PRECISION losslessly enough — PEP 484 likewise lets int stand in
+    for float), while `bool` is rejected for numeric fields even though it
+    subclasses int — `True` silently stored as 1 is almost always a bug.
+    """
+    if python_type in (int, float) and isinstance(value, bool):
+        return False
+    if python_type is float:
+        return isinstance(value, (int, float, Decimal))
+    return isinstance(value, python_type)
 
 
 T = TypeVar("T")
@@ -299,7 +315,7 @@ class PostgreSQLConnector:
         instances = [model._from_row(row) for row in rows]
 
         if opts.include and instances:
-            await self._resolver.resolve(instances, opts.include, model)
+            await self._resolver.resolve(instances, opts.include, model, session=session)
 
         return instances
 
@@ -421,10 +437,14 @@ class PostgreSQLConnector:
             })
             print(user.id)   # populated
         """
-        # Handle auto_now_add fields
+        # Stamp auto_now_add (unless given) and auto_now — on a copy, so the
+        # caller's dict is never mutated. Same rules as upsert().
+        data = dict(data)
         now = datetime.utcnow()
         for name, field_def in model._fields.items():
             if field_def.auto_now_add and name not in data:
+                data[name] = now
+            if field_def.auto_now:
                 data[name] = now
 
         self._validate_field_types(model, data)
@@ -485,7 +505,8 @@ class PostgreSQLConnector:
 
         now = datetime.utcnow()
 
-        # Normalize all records: apply auto_now_add, collect column set
+        # Normalize all records: apply auto_now_add and Python-side Field
+        # defaults (as create() does), collect column set
         all_columns: set = set()
         normalized: List[Dict[str, Any]] = []
         for data in records:
@@ -493,6 +514,8 @@ class PostgreSQLConnector:
             for name, field_def in model._fields.items():
                 if field_def.auto_now_add and name not in row:
                     row[name] = now
+                elif name not in row and name in model._field_defaults:
+                    row[name] = model._field_defaults[name]
             # Skip auto-increment PK if not provided
             for name, field_def in model._fields.items():
                 if field_def.auto_increment and name not in row:
@@ -514,7 +537,12 @@ class PostgreSQLConnector:
         for row in normalized:
             placeholders = []
             for col in columns:
-                val = row.get(col)
+                # A column some other record sets but this one omits gets the
+                # column's DEFAULT (serial id, server default) — not NULL.
+                if col not in row:
+                    placeholders.append("DEFAULT")
+                    continue
+                val = row[col]
                 param_idx += 1
                 placeholders.append(f"${param_idx}")
                 all_params.append(val)
@@ -639,7 +667,7 @@ class PostgreSQLConnector:
             # validate it against the model's annotation.
             if field_def.auto_now or field_def.auto_now_add:
                 continue
-            if not isinstance(value, field_def.python_type):
+            if not _value_matches_type(value, field_def.python_type):
                 raise ConfigurationError(f"Field '{name}' expects {field_def.python_type.__name__}, got {type(value).__name__}")
 
     # ── update_by_id ──────────────────────────────────────────────────────
@@ -656,15 +684,49 @@ class PostgreSQLConnector:
         one round trip via `UPDATE ... RETURNING *` (previously an UPDATE
         followed by a separate SELECT).
 
+        If the model overrides `before_update`/`after_update`, the current
+        row is loaded first so `before_update(data)` can run on it (and
+        mutate `data`), and `after_update()` runs on the updated row. Returns
+        None without firing hooks if no row has that PK. Inside a
+        transaction (`session=` / `begin()`) the row is loaded `FOR UPDATE`,
+        so it can't change between the hook and the UPDATE; outside one,
+        the load and the UPDATE are separate statements.
+
         Example:
             user = await connector.update_by_id(User, 42, {"name": "Rajesh"})
         """
         pk = self._require_pk(model)
+        data = dict(data)
+
+        has_hooks = model._overrides_hook("before_update") or model._overrides_hook("after_update")
+        if has_hooks:
+            current = await self._load_for_hook(model, id, session)
+            if current is None:
+                return None
+            await current._trigger_hook("before_update", data)
+
         prepared = self._prepare_update_data(model, data)
         qb = QueryBuilder(model.__table__, model._fields)
         sql, params = qb.build_update({pk: id}, prepared, returning_all=True)
         rows = await self._fetch(sql, params, session=session)
-        return model._from_row(rows[0]) if rows else None
+        if not rows:
+            return None
+
+        updated = model._from_row(rows[0])
+        if has_hooks:
+            await updated._trigger_hook("after_update")
+        return updated
+
+    async def _load_for_hook(self, model: Type[PostgreSQLModel], id: Any, session: Optional[Any]) -> Optional[PostgreSQLModel]:
+        """
+        Load the row a before_update/before_delete hook runs on. Inside a
+        transaction it's locked FOR UPDATE, so the hook's view of the row
+        stays true until the write (READ COMMITTED alone wouldn't stop a
+        concurrent transaction changing it in between). Outside one a lock
+        would be released immediately, so none is taken.
+        """
+        filter = {"lock": "update"} if session is not None else {}
+        return await self.find_by_id(model, id, filter, session=session)
 
     # ── delete_all ────────────────────────────────────────────────────────
 
@@ -702,10 +764,21 @@ class PostgreSQLConnector:
         """
         Delete a record by PK. Returns True if a row was deleted.
 
+        If the model overrides `before_delete`, the row is loaded first
+        (`FOR UPDATE` inside a transaction, as in update_by_id) and the hook
+        runs on it before the DELETE (returns False without firing it if no
+        row has that PK).
+
         Example:
             deleted = await connector.delete_by_id(User, 42)
         """
-        pk       = self._require_pk(model)
+        pk = self._require_pk(model)
+        if model._overrides_hook("before_delete"):
+            current = await self._load_for_hook(model, id, session)
+            if current is None:
+                return False
+            await current._trigger_hook("before_delete")
+
         affected = await self.delete_all(model, {pk: id}, session=session)
         return affected > 0
 

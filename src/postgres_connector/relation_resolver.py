@@ -9,7 +9,10 @@ Strategy:
     4. Recurse into sub-includes on those instances
     5. Stitch results back onto parent instances
 
-All sibling relations at the same depth run concurrently via asyncio.gather.
+All sibling relations at the same depth run concurrently via asyncio.gather —
+except inside a transaction (`session` given), where every query must run on
+that one connection, and asyncpg allows only one operation per connection at
+a time, so siblings run sequentially instead.
 
 Supported relation types:
   - hasMany          → parent.pk  → child.fk
@@ -62,6 +65,44 @@ def _parse_include(item: IncludeItem) -> IncludeScope:
     raise ValueError(f"Unsupported include item type: {type(item)!r} — {item!r}")
 
 
+def _merge_includes(scopes: List[IncludeScope]) -> List[IncludeScope]:
+    """
+    Combine include items that target the same relation into one, so it's
+    loaded once with all requested sub-includes — e.g. "posts.comments" and
+    "posts.tags" both name `posts`, and resolving them separately would load
+    `posts` twice, the second load overwriting the first (and its comments).
+
+    Sub-includes are concatenated. Other scope options (where, order, limit,
+    ...) can't be combined meaningfully, so at most one of the merged items
+    may set them; two different ones raise QueryError.
+    """
+    merged: Dict[str, IncludeScope] = {}
+    for scope in scopes:
+        existing = merged.get(scope.relation)
+        if existing is None:
+            merged[scope.relation] = scope
+            continue
+
+        a = existing.scope or FilterOptions()
+        b = scope.scope or FilterOptions()
+        options = {}
+        for name in ("where", "order", "limit", "skip", "fields", "lock"):
+            va, vb = getattr(a, name), getattr(b, name)
+            if va is not None and vb is not None and va != vb:
+                raise QueryError(
+                    f"Conflicting '{name}' scopes for included relation '{scope.relation}'. "
+                    f"Include it once with a single scope instead."
+                )
+            options[name] = va if va is not None else vb
+
+        include = list(a.include or []) + list(b.include or [])
+        merged[scope.relation] = IncludeScope(
+            relation=scope.relation,
+            scope=FilterOptions(include=include or None, **options),
+        )
+    return list(merged.values())
+
+
 def _dict_to_filter(d: Dict) -> FilterOptions:
     return FilterOptions(
         where   = d.get("where"),
@@ -92,15 +133,25 @@ class RelationResolver:
         instances:   List["PostgreSQLModel"],
         include:     List[IncludeItem],
         model_class: Type["PostgreSQLModel"],
+        session:     Optional[Any] = None,
     ) -> None:
         """
         Resolve all top-level includes concurrently, then recurse.
         Safe to call with an empty list.
+
+        `session` binds every relation query to that connection/transaction
+        (so relations see the transaction's own uncommitted writes, and a
+        transaction never needs a second pooled connection).
         """
         if not instances or not include:
             return
 
-        scopes = [_parse_include(item) for item in include]
+        scopes = _merge_includes([_parse_include(item) for item in include])
+
+        if session is not None:
+            for scope in scopes:
+                await self._resolve_one(instances, scope, model_class, session)
+            return
 
         results = await asyncio.gather(*(
             self._resolve_one(instances, scope, model_class)
@@ -118,6 +169,7 @@ class RelationResolver:
         parents:      List["PostgreSQLModel"],
         scope:        IncludeScope,
         parent_model: Type["PostgreSQLModel"],
+        session:      Optional[Any] = None,
     ) -> None:
         from .registry import registry
 
@@ -133,16 +185,16 @@ class RelationResolver:
             scope.scope = FilterOptions()
 
         if rel_def.relation_type == RelationType.HAS_MANY:
-            await self._has_many(parents, scope, rel_def, target_cls)
+            await self._has_many(parents, scope, rel_def, target_cls, session)
 
         elif rel_def.relation_type == RelationType.HAS_ONE:
-            await self._has_one(parents, scope, rel_def, target_cls)
+            await self._has_one(parents, scope, rel_def, target_cls, session)
 
         elif rel_def.relation_type == RelationType.BELONGS_TO:
-            await self._belongs_to(parents, scope, rel_def, target_cls)
+            await self._belongs_to(parents, scope, rel_def, target_cls, session)
 
         elif rel_def.relation_type == RelationType.HAS_MANY_THROUGH:
-            await self._has_many_through(parents, scope, rel_def, target_cls)
+            await self._has_many_through(parents, scope, rel_def, target_cls, session)
 
     # ── hasMany ───────────────────────────────────────────────────────────
 
@@ -152,6 +204,7 @@ class RelationResolver:
         scope:      IncludeScope,
         rel_def:    RelationDefinition,
         target_cls: Type["PostgreSQLModel"],
+        session:    Optional[Any] = None,
     ) -> None:
         """parent.pk → child.foreign_key  (1-to-many)"""
         parent_pk  = self._pk(parents[0].__class__)
@@ -165,12 +218,12 @@ class RelationResolver:
         try:
             rows = await self._query_by_fk(
                 target_cls.__table__, rel_def.foreign_key, parent_ids,
-                scope.scope, target_cls._fields,
+                scope.scope, target_cls._fields, session,
             )
             children = [target_cls._from_row(r) for r in rows]
 
             if scope.scope and scope.scope.include:
-                await self.resolve(children, scope.scope.include, target_cls)
+                await self.resolve(children, scope.scope.include, target_cls, session)
 
             grouped: dict = {pid: [] for pid in parent_ids}
             for child in children:
@@ -194,6 +247,7 @@ class RelationResolver:
         scope:      IncludeScope,
         rel_def:    RelationDefinition,
         target_cls: Type["PostgreSQLModel"],
+        session:    Optional[Any] = None,
     ) -> None:
         """parent.pk → child.foreign_key  (1-to-1, returns first child)"""
         parent_pk  = self._pk(parents[0].__class__)
@@ -207,12 +261,12 @@ class RelationResolver:
         try:
             rows = await self._query_by_fk(
                 target_cls.__table__, rel_def.foreign_key, parent_ids,
-                scope.scope, target_cls._fields,
+                scope.scope, target_cls._fields, session,
             )
             children = [target_cls._from_row(r) for r in rows]
 
             if scope.scope and scope.scope.include:
-                await self.resolve(children, scope.scope.include, target_cls)
+                await self.resolve(children, scope.scope.include, target_cls, session)
 
             grouped: dict = {}
             for child in children:
@@ -236,6 +290,7 @@ class RelationResolver:
         scope:      IncludeScope,
         rel_def:    RelationDefinition,
         target_cls: Type["PostgreSQLModel"],
+        session:    Optional[Any] = None,
     ) -> None:
         """child.foreign_key → parent.pk  (many-to-1)"""
         target_pk = self._pk(target_cls)
@@ -254,12 +309,12 @@ class RelationResolver:
         try:
             rows = await self._query_by_pk(
                 target_cls.__table__, target_pk, fk_vals,
-                scope.scope, target_cls._fields,
+                scope.scope, target_cls._fields, session,
             )
             parents = [target_cls._from_row(r) for r in rows]
 
             if scope.scope and scope.scope.include:
-                await self.resolve(parents, scope.scope.include, target_cls)
+                await self.resolve(parents, scope.scope.include, target_cls, session)
 
             by_pk = {p.__dict__.get(target_pk): p for p in parents}
 
@@ -279,6 +334,7 @@ class RelationResolver:
         scope:      IncludeScope,
         rel_def:    RelationDefinition,
         target_cls: Type["PostgreSQLModel"],
+        session:    Optional[Any] = None,
     ) -> None:
         """
         parent.pk → junction.foreign_key + junction.other_key → target.pk
@@ -299,7 +355,7 @@ class RelationResolver:
             # Step 1: Query junction table
             junction_rows = await self._query_by_fk(
                 through_cls.__table__, rel_def.foreign_key, parent_ids,
-                None, through_cls._fields,
+                None, through_cls._fields, session,
             )
 
             if not junction_rows:
@@ -323,14 +379,16 @@ class RelationResolver:
             target_pk = self._pk(target_cls)
             target_rows = await self._query_by_pk(
                 target_cls.__table__, target_pk, target_ids,
-                scope.scope, target_cls._fields,
+                scope.scope, target_cls._fields, session,
             )
             targets = [target_cls._from_row(r) for r in target_rows]
 
             if scope.scope and scope.scope.include:
-                await self.resolve(targets, scope.scope.include, target_cls)
+                await self.resolve(targets, scope.scope.include, target_cls, session)
 
-            # Step 4: Stitch via junction table
+            # Step 4: Stitch via junction table, keeping the target query's
+            # order (scope "order"), then apply scope skip/limit per parent.
+            target_rank  = {t.__dict__.get(target_pk): i for i, t in enumerate(targets)}
             target_by_pk = {t.__dict__.get(target_pk): t for t in targets}
             parent_to_targets: dict = {pid: [] for pid in parent_ids}
 
@@ -340,6 +398,14 @@ class RelationResolver:
                 target_obj = target_by_pk.get(target_fk)
                 if target_obj and parent_fk in parent_to_targets:
                     parent_to_targets[parent_fk].append(target_obj)
+
+            opts = scope.scope
+            skip = (opts.skip if opts else None) or 0
+            limit = opts.limit if opts else None
+            for pid, items in parent_to_targets.items():
+                if opts and opts.order:
+                    items.sort(key=lambda t: target_rank[t.__dict__.get(target_pk)])
+                parent_to_targets[pid] = items[skip:None if limit is None else skip + limit]
 
             for parent in parents:
                 pk_val = parent.__dict__.get(parent_pk)
@@ -358,10 +424,11 @@ class RelationResolver:
         fk_vals:   List[Any],
         opts:      Optional[FilterOptions],
         fields:    Dict,
+        session:   Optional[Any] = None,
     ) -> List[Dict]:
         qb = QueryBuilder(table, fields)
         sql, params = qb.build_select_by_fk(fk_field, fk_vals, opts)
-        return await self._fetch(sql, params)
+        return await self._fetch(sql, params, session)
 
     async def _query_by_pk(
         self,
@@ -370,12 +437,17 @@ class RelationResolver:
         pk_vals:  List[Any],
         opts:     Optional[FilterOptions],
         fields:   Dict,
+        session:  Optional[Any] = None,
     ) -> List[Dict]:
         qb = QueryBuilder(table, fields)
         sql, params = qb.build_select_by_pk(pk_field, pk_vals, opts)
-        return await self._fetch(sql, params)
+        return await self._fetch(sql, params, session)
 
-    async def _fetch(self, sql: str, params: List[Any]) -> List[Dict]:
+    async def _fetch(self, sql: str, params: List[Any], session: Optional[Any] = None) -> List[Dict]:
+        if session is not None:
+            self._pool.log_query(sql, params)
+            rows = await session.fetch(sql, *params)
+            return [dict(r) for r in rows]
         return await self._pool.fetch_all(sql, params)
 
     # ── Helpers ───────────────────────────────────────────────────────────

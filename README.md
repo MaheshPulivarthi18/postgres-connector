@@ -13,7 +13,7 @@ Built on [`asyncpg`](https://github.com/MagicStack/asyncpg) — the fastest Post
 - **Nested includes** — `"orders.items.product"` resolved in O(depth) queries, not O(N)
 - **4 relation types** — `hasOne`, `hasMany`, `belongsTo`, `hasManyThrough`
 - **Schema migrations** — additive-only `migrate()` syncs your models to the database
-- **Hooks** — `before_create`, `after_create`, `before_update`, etc.
+- **Hooks** — `before_create`/`after_create` (`create()`), `before_update`/`after_update` (`update_by_id()`), `before_delete` (`delete_by_id()`); bulk `create_many`/`update_all`/`delete_all` skip them. Raising from a `before_*` hook aborts the write
 - **Transactions** — `begin()`/`run_transaction()` with nested savepoints and automatic retry on serialization failures/deadlocks
 - **Fault tolerant** — reads auto-retry through transient connection failures (DB restart, network blip); writes never blind-retry
 - **Timeouts** — configurable default per-query timeout, plus a per-call override on `raw()`/`raw_execute()`/`call()`; a timeout is never mistaken for a retryable connection failure
@@ -108,6 +108,14 @@ await connector.find(User, {
     "skip": 40,
     "fields": ["id", "name", "email"],
     "include": ["orders.items.product"],
+})
+```
+
+An include can carry its own `scope` (`where`, `order`, `limit`, `skip`, `fields`, nested `include`). `limit`/`skip` apply **per parent**, so this loads each user's 5 most recent orders, still in one query per relation:
+
+```python
+users = await connector.find(User, {
+    "include": [{"relation": "orders", "scope": {"order": ["created_at DESC"], "limit": 5}}],
 })
 ```
 

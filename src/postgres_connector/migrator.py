@@ -29,6 +29,15 @@ TYPE_MAP = {
     datetime: "TIMESTAMP",
 }
 
+def _quote_literal(value: str) -> str:
+    """
+    Quote a string as a SQL literal for DDL (DEFAULT clauses can't take bind
+    parameters). Doubling single quotes is sufficient with
+    standard_conforming_strings, which is on by default since PostgreSQL 9.1.
+    """
+    return "'" + value.replace("'", "''") + "'"
+
+
 class Migrator:
     def __init__(self, pool: ConnectionPool):
         self._pool = pool
@@ -535,7 +544,7 @@ class Migrator:
         elif field.auto_now_add: parts.append("DEFAULT CURRENT_TIMESTAMP")
         elif field.auto_now: parts.append("DEFAULT CURRENT_TIMESTAMP")
         elif field.has_default and field.default is not None:
-            if isinstance(field.default, str): parts.append(f"DEFAULT '{field.default}'")
+            if isinstance(field.default, str): parts.append(f"DEFAULT {_quote_literal(field.default)}")
             elif isinstance(field.default, bool): parts.append(f"DEFAULT {'TRUE' if field.default else 'FALSE'}")
             else: parts.append(f"DEFAULT {field.default}")
 
