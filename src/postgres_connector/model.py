@@ -105,6 +105,13 @@ class ModelMeta(type):
             ):
                 continue  # keep the definition inherited from the parent model
 
+            if raw_value is _UNSET and annotation_owner[attr_name] is not cls:
+                # Declared on a plain mixin class (`class Order(TimestampMixin,
+                # PostgreSQLModel)`): its Field()/Relation() lives on the mixin,
+                # not in this class's namespace. Read it from there, and leave
+                # it on the mixin so every model using the mixin sees it.
+                raw_value = annotation_owner[attr_name].__dict__.get(attr_name, _UNSET)
+
             if isinstance(raw_value, Field):
                 # Explicit Field() descriptor
                 python_type = mcs._unwrap_type(mcs._resolve_annotation(attr_annotation, cls))
@@ -144,6 +151,14 @@ class ModelMeta(type):
                     delattr(cls, attr_name)
                 except AttributeError:
                     pass
+
+        # A Relation() declared on a plain mixin stays on the mixin (other
+        # models share it), where normal attribute lookup would find it before
+        # __getattr__ runs. Shadow it so instance.<relation> resolves the
+        # loaded value (or raises RelationNotLoadedError) as usual.
+        for rel_name in cls._relations:
+            if isinstance(getattr(cls, rel_name, None), Relation):
+                setattr(cls, rel_name, property(lambda self, _name=rel_name: self.__getattr__(_name)))
 
         # ── Parse composite indexes ───────────────────────────────────────
         composite_indexes = getattr(cls, "__indexes__", [])

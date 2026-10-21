@@ -159,6 +159,22 @@ class Order(PostgreSQLModel):
     user:    "User" = Relation(type="belongsTo", foreign_key="user_id")
 ```
 
+## Mixins
+
+The library ships no mixins. You write your own as plain classes with fields, relations and hooks, and attach them through inheritance:
+
+```python
+class TimestampMixin:
+    created_at: str = Field(auto_now_add=True)
+    updated_at: str = Field(auto_now=True, nullable=True)
+
+class Order(TimestampMixin, PostgreSQLModel):
+    __table__ = "orders"
+    id: int = Field(primary_key=True)
+```
+
+A mixin's `Field(...)` options, `Relation(...)`s and hook methods apply to every model that inherits it.
+
 ## Upsert
 
 `INSERT ... ON CONFLICT (...) DO UPDATE` in one round trip — no race between a check-then-write. `conflict_target` must have a unique or primary-key constraint in the database (Postgres requires this to detect the conflict).
