@@ -299,7 +299,7 @@ class PostgreSQLConnector:
         instances = [model._from_row(row) for row in rows]
 
         if opts.include and instances:
-            await self._resolver.resolve(instances, opts.include, model)
+            await self._resolver.resolve(instances, opts.include, model, session=session)
 
         return instances
 
