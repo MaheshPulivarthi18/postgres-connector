@@ -349,10 +349,14 @@ class PostgreSQLConnector:
             async for row in self._stream_cursor(conn, sql, params, batch_size):
                 yield model._from_row(row)
 
-    @staticmethod
-    async def _stream_cursor(conn: Any, sql: str, params: List[Any], batch_size: int) -> AsyncGenerator[dict, None]:
-        async for record in conn.cursor(sql, *params, prefetch=batch_size):
-            yield dict(record)
+    async def _stream_cursor(self, conn: Any, sql: str, params: List[Any], batch_size: int) -> AsyncGenerator[dict, None]:
+        # Same typed-error translation as every other query path (a timeout
+        # becomes QueryTimeoutError, not a raw TimeoutError). The cursor runs
+        # under the connection's default command_timeout.
+        self._pool.log_query(sql, params)
+        async with _translate_db_errors(timeout=self._pool._config["command_timeout"]):
+            async for record in conn.cursor(sql, *params, prefetch=batch_size):
+                yield dict(record)
 
     # ── find_one ──────────────────────────────────────────────────────────
 
