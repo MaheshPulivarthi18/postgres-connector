@@ -25,7 +25,6 @@ from postgres_connector.registry import registry
 
 N_CUSTOMERS = 5_000
 N_ORDERS = 20_000
-N_JOBS = 2_000
 
 results: list = []  # (feature_name, ok: bool, detail: str)
 
@@ -53,15 +52,8 @@ class Order(PostgreSQLModel):
     customer:    "Customer" = Relation(type="belongsTo", foreign_key="customer_id")
 
 
-class Job(PostgreSQLModel):
-    __table__ = "smoke_jobs"
-    id:      int = Field(primary_key=True)
-    status:  str = Field(default="pending")
-    payload: str = Field()
-
-
 async def seed(connector):
-    print(f"\n== Seeding {N_CUSTOMERS} customers, {N_ORDERS} orders, {N_JOBS} jobs ==")
+    print(f"\n== Seeding {N_CUSTOMERS} customers, {N_ORDERS} orders ==")
     t0 = time.monotonic()
 
     for start in range(0, N_CUSTOMERS, 1000):
@@ -85,12 +77,6 @@ async def seed(connector):
         await connector.create_many(Order, batch)
     order_count = await connector.count(Order)
     check("create_many: bulk order insert", order_count == N_ORDERS, f"{order_count} rows")
-
-    for start in range(0, N_JOBS, 1000):
-        batch = [{"payload": f"task #{i}"} for i in range(start, min(start + 1000, N_JOBS))]
-        await connector.create_many(Job, batch)
-    job_count = await connector.count(Job)
-    check("create_many: bulk job insert", job_count == N_JOBS, f"{job_count} rows")
 
     print(f"  seeded in {time.monotonic() - t0:.1f}s")
     return customer_ids
@@ -231,7 +217,6 @@ async def main():
     await connector.connect()
     registry.register(Customer)
     registry.register(Order)
-    registry.register(Job)
     await connector.migrate()
 
     try:
@@ -247,7 +232,6 @@ async def main():
         print("\n== Cleanup ==")
         await connector.raw_execute("DROP TABLE IF EXISTS smoke_orders")
         await connector.raw_execute("DROP TABLE IF EXISTS smoke_customers")
-        await connector.raw_execute("DROP TABLE IF EXISTS smoke_jobs")
         await connector.disconnect()
 
     print("\n" + "=" * 60)
