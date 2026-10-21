@@ -291,14 +291,6 @@ class PostgreSQLConnector:
         """
         opts = self._to_filter(filter)
 
-        if opts.lock and session is None:
-            raise QueryError(
-                "filter['lock'] requires running inside a transaction — pass session=, "
-                "or use connector.begin()/run_transaction(). A lock taken outside an "
-                "explicit transaction is released the instant the query finishes and "
-                "has no effect."
-            )
-
         qb = QueryBuilder(model.__table__, model._fields)
         sql, params = qb.build_select(opts)
 
@@ -661,8 +653,11 @@ class PostgreSQLConnector:
         concurrent transaction changing it in between). Outside one a lock
         would be released immediately, so none is taken.
         """
-        filter = {"lock": "update"} if session is not None else {}
-        return await self.find_by_id(model, id, filter, session=session)
+        pk = self._require_pk(model)
+        qb = QueryBuilder(model.__table__, model._fields)
+        sql, params = qb.build_select(FilterOptions(where={pk: id}, limit=1), for_update=session is not None)
+        rows = await self._fetch(sql, params, session=session, retryable=session is None)
+        return model._from_row(rows[0]) if rows else None
 
     # ── delete_all ────────────────────────────────────────────────────────
 
@@ -934,7 +929,6 @@ class PostgreSQLConnector:
                 skip    = filter.skip,
                 fields  = filter.fields,
                 include = filter.include,
-                lock    = filter.lock,
             )
         if isinstance(filter, dict):
             return _dict_to_filter(filter)

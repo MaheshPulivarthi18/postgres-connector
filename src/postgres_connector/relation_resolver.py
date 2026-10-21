@@ -86,7 +86,7 @@ def _merge_includes(scopes: List[IncludeScope]) -> List[IncludeScope]:
         a = existing.scope or FilterOptions()
         b = scope.scope or FilterOptions()
         options = {}
-        for name in ("where", "order", "limit", "skip", "fields", "lock"):
+        for name in ("where", "order", "limit", "skip", "fields"):
             va, vb = getattr(a, name), getattr(b, name)
             if va is not None and vb is not None and va != vb:
                 raise QueryError(
@@ -103,7 +103,13 @@ def _merge_includes(scopes: List[IncludeScope]) -> List[IncludeScope]:
     return list(merged.values())
 
 
+_FILTER_KEYS = ("where", "order", "limit", "skip", "fields", "include")
+
+
 def _dict_to_filter(d: Dict) -> FilterOptions:
+    unknown = sorted(set(d) - set(_FILTER_KEYS))
+    if unknown:
+        raise QueryError(f"Unknown filter key(s) {unknown}. Supported: {list(_FILTER_KEYS)}")
     return FilterOptions(
         where   = d.get("where"),
         order   = d.get("order"),
@@ -111,7 +117,6 @@ def _dict_to_filter(d: Dict) -> FilterOptions:
         skip    = d.get("skip"),
         fields  = d.get("fields"),
         include = d.get("include"),
-        lock    = d.get("lock"),
     )
 
 
