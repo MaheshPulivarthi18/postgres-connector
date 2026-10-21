@@ -84,3 +84,45 @@ async def test_failing_migration_file_is_rolled_back_and_not_recorded(connector,
     finally:
         await connector.raw_execute('DROP TABLE IF EXISTS "semi_partial"')
         await connector.raw_execute("DROP TABLE IF EXISTS schema_migrations")
+
+
+async def _unique_constraints(connector, table):
+    rows = await connector.raw(
+        "SELECT conname FROM pg_constraint WHERE conrelid = $1::regclass AND contype = 'u' ORDER BY conname",
+        [table],
+    )
+    return [r["conname"] for r in rows]
+
+
+@pytest.mark.asyncio
+async def test_unique_column_gets_exactly_one_constraint(connector):
+    """#15: new tables and newly added columns get one unique constraint, not two."""
+    await connector.raw_execute('DROP TABLE IF EXISTS "uniq_once"')
+
+    class UniqOnce(PostgreSQLModel):
+        __table__ = "uniq_once"
+        id:    int = Field(primary_key=True)
+        email: str = Field(unique=True)
+
+    try:
+        await connector.migrate()
+        assert await _unique_constraints(connector, "uniq_once") == ["uq_uniq_once_email"]
+
+        class UniqOnce(PostgreSQLModel):  # noqa: F811 — add a unique column to the existing table
+            __table__ = "uniq_once"
+            id:     int = Field(primary_key=True)
+            email:  str = Field(unique=True)
+            handle: str = Field(unique=True, nullable=True)
+
+        await connector.migrate()
+        assert await _unique_constraints(connector, "uniq_once") == ["uq_uniq_once_email", "uq_uniq_once_handle"]
+
+        # Uniqueness is still enforced, and a re-run is a no-op.
+        await connector.raw_execute("INSERT INTO uniq_once (email) VALUES ('a@x')")
+        with pytest.raises(Exception, match="uq_uniq_once_email"):
+            await connector.raw_execute("INSERT INTO uniq_once (email) VALUES ('a@x')")
+        await connector.migrate()
+        assert await _unique_constraints(connector, "uniq_once") == ["uq_uniq_once_email", "uq_uniq_once_handle"]
+    finally:
+        registry.unregister("UniqOnce")
+        await connector.raw_execute('DROP TABLE IF EXISTS "uniq_once"')

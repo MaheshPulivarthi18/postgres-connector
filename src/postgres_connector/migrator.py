@@ -527,7 +527,9 @@ class Migrator:
         elif field.primary_key and skip_primary_key: parts.append("NOT NULL")
         elif not field.nullable: parts.append("NOT NULL")
 
-        if field.unique and not field.primary_key: parts.append("UNIQUE")
+        # No inline UNIQUE here: _sync_unique_constraints() adds the managed
+        # "uq_<table>_<col>" constraint for unique=True columns. An inline one
+        # as well would give every unique column two identical indexes.
 
         if field.is_json: pass
         elif field.auto_now_add: parts.append("DEFAULT CURRENT_TIMESTAMP")
