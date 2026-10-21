@@ -46,15 +46,6 @@ class TransactionContext:
     ) -> List["PostgreSQLModel"]:
         return await self._connector.find(model, filter, session=self._conn)
 
-    async def stream(
-        self,
-        model:      Type["PostgreSQLModel"],
-        filter:     Union[dict, FilterOptions] = {},
-        batch_size: int = 100,
-    ) -> AsyncGenerator["PostgreSQLModel", None]:
-        async for instance in self._connector.stream(model, filter, batch_size, session=self._conn):
-            yield instance
-
     async def find_one(
         self,
         model:  Type["PostgreSQLModel"],

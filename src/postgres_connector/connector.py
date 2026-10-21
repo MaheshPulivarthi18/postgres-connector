@@ -33,7 +33,7 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, AsyncGenerator, Awaitable, Callable, Optional, Type, TypeVar, Union, Dict, List, Tuple
+from typing import Any, Awaitable, Callable, Optional, Type, TypeVar, Union, Dict, List, Tuple
 
 try:
     import asyncpg
@@ -309,61 +309,6 @@ class PostgreSQLConnector:
             await self._resolver.resolve(instances, opts.include, model, session=session)
 
         return instances
-
-    # ── stream ───────────────────────────────────────────────────────────
-
-    async def stream(
-        self,
-        model:      Type[PostgreSQLModel],
-        filter:     Union[dict, FilterOptions] = {},
-        batch_size: int = 100,
-        session:    Optional[Any] = None,
-    ) -> AsyncGenerator[PostgreSQLModel, None]:
-        """
-        Stream rows one at a time via a server-side cursor, instead of
-        materializing the whole result set in memory like find() does.
-        Use for large exports, backfills, or any batch job over more rows
-        than comfortably fit in memory at once.
-
-        This holds ONE connection open for as long as you keep iterating
-        — that's the trade: bounded memory in exchange for a held
-        connection. Don't leave a stream half-consumed under heavy
-        concurrent load on a small pool. If `session` isn't given, a
-        dedicated transaction is opened and committed automatically when
-        the stream ends (or closed early, e.g. via `break`).
-
-        `include` (relation batch-loading) is not supported — resolving
-        relations a row at a time would defeat the point of streaming, and
-        batching them requires buffering many rows first.
-
-        Example:
-            async for user in connector.stream(User, {"where": {"active": True}}):
-                await export_row(user)   # only ~batch_size rows in memory
-        """
-        opts = self._to_filter(filter)
-        if opts.include:
-            raise QueryError("stream() does not support 'include' — relation batch-loading defeats streaming.")
-
-        qb = QueryBuilder(model.__table__, model._fields)
-        sql, params = qb.build_select(opts)
-
-        if session is not None:
-            async for row in self._stream_cursor(session, sql, params, batch_size):
-                yield model._from_row(row)
-            return
-
-        async with self._pool.transaction() as conn:
-            async for row in self._stream_cursor(conn, sql, params, batch_size):
-                yield model._from_row(row)
-
-    async def _stream_cursor(self, conn: Any, sql: str, params: List[Any], batch_size: int) -> AsyncGenerator[dict, None]:
-        # Same typed-error translation as every other query path (a timeout
-        # becomes QueryTimeoutError, not a raw TimeoutError). The cursor runs
-        # under the connection's default command_timeout.
-        self._pool.log_query(sql, params)
-        async with _translate_db_errors(timeout=self._pool._config["command_timeout"]):
-            async for record in conn.cursor(sql, *params, prefetch=batch_size):
-                yield dict(record)
 
     # ── find_one ──────────────────────────────────────────────────────────
 

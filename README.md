@@ -20,7 +20,6 @@ Built on [`asyncpg`](https://github.com/MagicStack/asyncpg) — the fastest Post
 - **Typed error mapping** — unique/FK/not-null/check violations become `UniqueConstraintError`/etc., not raw `asyncpg` exceptions
 - **Row locking** — `FOR UPDATE`/`FOR SHARE`/`SKIP LOCKED` in the filter DSL
 - **Upsert** — `INSERT ... ON CONFLICT DO UPDATE`/`DO NOTHING` in one round trip
-- **Streaming** — `stream()` reads large result sets through a server-side cursor, bounded memory
 - **JSONB support** — `JSONField` for dict/list columns with auto serialization
 - **FastAPI ready** — `__json__()` hook for response serialization
 
@@ -134,17 +133,6 @@ users = await connector.find(User, {
 | `nin`     | `NOT IN (...)`     |
 | `between` | `BETWEEN x AND y`  |
 | `regexp`  | `~`                |
-
-## Streaming Large Result Sets
-
-`find()` loads the whole result set into memory. For exports, backfills, or any batch job over more rows than comfortably fit in memory, `stream()` reads through a server-side cursor instead — bounded memory, one round trip to the server per `batch_size` rows instead of one giant round trip for everything.
-
-```python
-async for user in connector.stream(User, {"where": {"active": True}}, batch_size=500):
-    await export_row(user)   # only ~500 rows in memory at a time, not the whole table
-```
-
-This holds one connection open for as long as you keep iterating — that's the trade: bounded memory in exchange for a held connection, so don't leave a stream half-consumed under heavy concurrent load on a small pool. If you don't pass `session=`, `stream()` opens and manages its own transaction (cursors require one) and releases the connection automatically when the loop ends or you `break` out of it early. Also available inside a transaction via `tx.stream(...)`. `include` (relation batch-loading) isn't supported — resolving relations a row at a time would defeat the point of streaming.
 
 ## Relations
 
@@ -368,7 +356,7 @@ await connector.find(Post, {"where": {"deleted_at": None}})
 
 ## Full-Feature Verification
 
-[`examples/full_feature_smoketest.py`](examples/full_feature_smoketest.py) seeds a large local dataset (5,000 customers, 20,000 orders, 2,000 jobs) and exercises every feature in this README against it end-to-end — bulk `create_many`, the filter DSL, zero-N+1 relation loading, upsert, transactions/savepoints, `SKIP LOCKED` row locking across concurrent workers, streaming cursors, delete, typed exception mapping, and query timeouts — printing a pass/fail line per feature:
+[`examples/full_feature_smoketest.py`](examples/full_feature_smoketest.py) seeds a large local dataset (5,000 customers, 20,000 orders, 2,000 jobs) and exercises every feature in this README against it end-to-end — bulk `create_many`, the filter DSL, zero-N+1 relation loading, upsert, transactions/savepoints, `SKIP LOCKED` row locking across concurrent workers, delete, typed exception mapping, and query timeouts — printing a pass/fail line per feature:
 
 ```bash
 DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=postgres DB_PASSWORD=secret DB_NAME=smoketest \
