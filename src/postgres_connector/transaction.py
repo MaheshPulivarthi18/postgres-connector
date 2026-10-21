@@ -1,13 +1,8 @@
 """
 TransactionContext — an ergonomic, transaction-bound view of PostgreSQLConnector.
 
-Problem it solves:
-    async with connector.transaction() as conn:
-        await connector.create(User, {...}, session=conn)   # easy to forget `session=`
-        await connector.update_by_id(Account, acct_id, {...})  # BUG: runs outside the tx!
-
-TransactionContext removes the foot-gun by binding every CRUD call to the
-same connection automatically:
+Every CRUD call made through it is bound to the same connection and
+transaction automatically, so no call can accidentally run outside it:
 
     async with connector.begin() as tx:
         user = await tx.create(User, {...})

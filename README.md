@@ -198,24 +198,20 @@ Migrations are **additive-only** — they create missing tables and add missing 
 
 ## Transactions
 
-Three ways to run work inside a transaction, from lowest to highest level:
-
-**`connector.transaction()`** — raw asyncpg connection, for hand-written SQL:
-
-```python
-async with connector.transaction() as conn:
-    await conn.execute("INSERT INTO orders (user_id, total) VALUES ($1, $2)", 1, 99.99)
-    await conn.execute("UPDATE users SET order_count = order_count + 1 WHERE id = $1", 1)
-# auto-committed; rolled back on exception
-```
-
-**`connector.begin()`** — typed ORM calls bound to one transaction automatically (no `session=` to remember, no way to accidentally write outside the transaction):
+**`connector.begin()`** — every ORM call made through `tx` runs in the same transaction, so nothing can accidentally write outside it:
 
 ```python
 async with connector.begin() as tx:
     order = await tx.create(Order, {"user_id": user.id, "total": 99.99})
     await tx.update_by_id(User, user.id, {"order_count": user.order_count + 1})
 # both committed together, or both rolled back on exception
+```
+
+Hand-written SQL joins the same transaction through `tx.raw(...)` / `tx.raw_execute(...)`:
+
+```python
+async with connector.begin() as tx:
+    await tx.raw_execute("UPDATE users SET order_count = order_count + 1 WHERE id = $1", [user.id])
 ```
 
 Nested `async with tx.begin():` blocks use PostgreSQL SAVEPOINTs, so a nested block can fail and roll back on its own without aborting the outer transaction.

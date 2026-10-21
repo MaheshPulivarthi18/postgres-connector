@@ -854,25 +854,6 @@ class PostgreSQLConnector:
 
     # ── Transactions ──────────────────────────────────────────────────────
 
-    def transaction(self):
-        """
-        Async context manager for explicit transactions. Yields the raw
-        asyncpg connection — use this when you want to run your own SQL
-        via `conn.execute(...)` / `conn.fetch(...)`.
-        Commits on clean exit, rolls back on exception.
-
-        For typed ORM calls (find/create/update_by_id/...) inside a
-        transaction, prefer `begin()` — it binds every call to the same
-        connection automatically instead of requiring `session=conn`.
-
-        Example:
-            async with connector.transaction() as conn:
-                await conn.execute("INSERT INTO orders ...")
-                await conn.execute("UPDATE inventory SET ...")
-            # auto-committed
-        """
-        return self._pool.transaction()
-
     def begin(
         self,
         *,
