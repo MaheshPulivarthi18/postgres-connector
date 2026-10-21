@@ -65,6 +65,44 @@ def _parse_include(item: IncludeItem) -> IncludeScope:
     raise ValueError(f"Unsupported include item type: {type(item)!r} — {item!r}")
 
 
+def _merge_includes(scopes: List[IncludeScope]) -> List[IncludeScope]:
+    """
+    Combine include items that target the same relation into one, so it's
+    loaded once with all requested sub-includes — e.g. "posts.comments" and
+    "posts.tags" both name `posts`, and resolving them separately would load
+    `posts` twice, the second load overwriting the first (and its comments).
+
+    Sub-includes are concatenated. Other scope options (where, order, limit,
+    ...) can't be combined meaningfully, so at most one of the merged items
+    may set them; two different ones raise QueryError.
+    """
+    merged: Dict[str, IncludeScope] = {}
+    for scope in scopes:
+        existing = merged.get(scope.relation)
+        if existing is None:
+            merged[scope.relation] = scope
+            continue
+
+        a = existing.scope or FilterOptions()
+        b = scope.scope or FilterOptions()
+        options = {}
+        for name in ("where", "order", "limit", "skip", "fields", "lock"):
+            va, vb = getattr(a, name), getattr(b, name)
+            if va is not None and vb is not None and va != vb:
+                raise QueryError(
+                    f"Conflicting '{name}' scopes for included relation '{scope.relation}'. "
+                    f"Include it once with a single scope instead."
+                )
+            options[name] = va if va is not None else vb
+
+        include = list(a.include or []) + list(b.include or [])
+        merged[scope.relation] = IncludeScope(
+            relation=scope.relation,
+            scope=FilterOptions(include=include or None, **options),
+        )
+    return list(merged.values())
+
+
 def _dict_to_filter(d: Dict) -> FilterOptions:
     return FilterOptions(
         where   = d.get("where"),
@@ -108,7 +146,7 @@ class RelationResolver:
         if not instances or not include:
             return
 
-        scopes = [_parse_include(item) for item in include]
+        scopes = _merge_includes([_parse_include(item) for item in include])
 
         if session is not None:
             for scope in scopes:
