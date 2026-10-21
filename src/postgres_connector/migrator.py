@@ -138,7 +138,7 @@ class Migrator:
                     for stmt in statements:
                         self._pool.log_query(stmt)
                         await conn.execute(stmt)
-                    await conn.execute("INSERT INTO schema_migrations (version) VALUES ($1)", [version])
+                    await conn.execute("INSERT INTO schema_migrations (version) VALUES ($1)", version)
                         
                 logger.info(f"Applied migration: {version}")
                 applied_count += 1
@@ -176,7 +176,7 @@ class Migrator:
             for stmt in statements:
                 self._pool.log_query(stmt)
                 await conn.execute(stmt)
-            await conn.execute("DELETE FROM schema_migrations WHERE version = $1", [version])
+            await conn.execute("DELETE FROM schema_migrations WHERE version = $1", version)
 
         logger.info(f"Rolled back migration: {version}")
         return 1
