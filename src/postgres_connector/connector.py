@@ -133,6 +133,10 @@ async def _translate_db_errors(timeout: Optional[float] = None):
         raise _translate_integrity_error(exc) from exc
 
 
+# asyncpg's limit on bind parameters in one statement.
+_MAX_QUERY_ARGS = 32767
+
+
 def _value_matches_type(value: Any, python_type: type) -> bool:
     """
     isinstance(), adjusted for numbers the way Python itself treats them:
@@ -443,36 +447,57 @@ class PostgreSQLConnector:
         columns = sorted(all_columns)
         col_sql = ", ".join([f'"{c}"' for c in columns])
 
-        # Build multi-row VALUES. JSON/JSONB values are left as native
-        # Python objects — the connection-level type codec (pool.py's
-        # _init_connection) handles serialization; dumping here too would
-        # double-encode them into a JSON string scalar instead of an object.
-        param_idx = 0
-        all_params: List[Any] = []
-        value_groups: List[str] = []
-        for row in normalized:
-            placeholders = []
-            for col in columns:
-                # A column some other record sets but this one omits gets the
-                # column's DEFAULT (serial id, server default) — not NULL.
-                if col not in row:
-                    placeholders.append("DEFAULT")
-                    continue
-                val = row[col]
-                param_idx += 1
-                placeholders.append(f"${param_idx}")
-                all_params.append(val)
-            value_groups.append(f"({', '.join(placeholders)})")
+        def build_insert(chunk: List[Dict[str, Any]]) -> Tuple[str, List[Any]]:
+            # Build multi-row VALUES. JSON/JSONB values are left as native
+            # Python objects — the connection-level type codec (pool.py's
+            # _init_connection) handles serialization; dumping here too would
+            # double-encode them into a JSON string scalar instead of an object.
+            param_idx = 0
+            params: List[Any] = []
+            value_groups: List[str] = []
+            for row in chunk:
+                placeholders = []
+                for col in columns:
+                    # A column some other record sets but this one omits gets the
+                    # column's DEFAULT (serial id, server default) — not NULL.
+                    if col not in row:
+                        placeholders.append("DEFAULT")
+                        continue
+                    param_idx += 1
+                    placeholders.append(f"${param_idx}")
+                    params.append(row[col])
+                value_groups.append(f"({', '.join(placeholders)})")
+            sql = f'INSERT INTO "{model.__table__}" ({col_sql}) VALUES {", ".join(value_groups)} RETURNING *'
+            return sql, params
 
-        sql = f'INSERT INTO "{model.__table__}" ({col_sql}) VALUES {", ".join(value_groups)} RETURNING *'
+        # asyncpg accepts at most 32,767 bind parameters per statement, so big
+        # batches go out as several INSERTs. They share one transaction (the
+        # caller's, if `session` is given), so create_many() stays all-or-nothing.
+        per_statement = max(1, _MAX_QUERY_ARGS // max(1, len(columns)))
+        chunks = [normalized[i:i + per_statement] for i in range(0, len(normalized), per_statement)]
+
+        async def insert_all(conn: Any) -> List[Dict[str, Any]]:
+            out: List[Dict[str, Any]] = []
+            for chunk in chunks:
+                sql, params = build_insert(chunk)
+                self._pool.log_query(sql, params)
+                out.extend(dict(r) for r in await conn.fetch(sql, *params))
+            return out
 
         async with _translate_db_errors():
-            if session:
-                self._pool.log_query(sql, all_params)
-                raw_rows = await session.fetch(sql, *all_params)
-                rows = [dict(r) for r in raw_rows]
+            if len(chunks) == 1:
+                sql, params = build_insert(chunks[0])
+                if session:
+                    self._pool.log_query(sql, params)
+                    rows = [dict(r) for r in await session.fetch(sql, *params)]
+                else:
+                    rows = await self._pool.fetch_all(sql, params)
+            elif session:
+                async with session.transaction():  # a savepoint inside the caller's transaction
+                    rows = await insert_all(session)
             else:
-                rows = await self._pool.fetch_all(sql, all_params)
+                async with self._pool.transaction() as conn:
+                    rows = await insert_all(conn)
 
         instances = [model._from_row(row) for row in rows]
         return instances
