@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional, Type, Union, Dict, List, Tuple
 
@@ -131,6 +131,15 @@ async def _translate_db_errors(timeout: Optional[float] = None):
         raise QueryTimeoutError(f"Query exceeded its timeout ({timeout}s)", timeout=timeout) from exc
     except asyncpg.exceptions.IntegrityConstraintViolationError as exc:  # type: ignore[union-attr]
         raise _translate_integrity_error(exc) from exc
+
+
+def _utc_now() -> datetime:
+    """
+    The stamp for auto_now / auto_now_add: an aware UTC datetime. Those
+    columns are TIMESTAMPTZ, so the instant is the same whether a row is
+    written here or by a column DEFAULT in any session time zone.
+    """
+    return datetime.now(timezone.utc)
 
 
 def _value_matches_type(value: Any, python_type: type) -> bool:
@@ -356,7 +365,7 @@ class PostgreSQLConnector:
         # Stamp auto_now_add (unless given) and auto_now — on a copy, so the
         # caller's dict is never mutated. Same rules as upsert().
         data = dict(data)
-        now = datetime.utcnow()
+        now = _utc_now()
         for name, field_def in model._fields.items():
             if field_def.auto_now_add and name not in data:
                 data[name] = now
@@ -419,7 +428,7 @@ class PostgreSQLConnector:
         if not records:
             return []
 
-        now = datetime.utcnow()
+        now = _utc_now()
 
         # Normalize all records: apply auto_now_add and Python-side Field
         # defaults (as create() does), collect column set
@@ -518,7 +527,7 @@ class PostgreSQLConnector:
             # calling again with the same email updates name/login_count
             # instead of raising a unique-constraint error
         """
-        now = datetime.utcnow()
+        now = _utc_now()
         prepared = dict(data)
         for name, field_def in model._fields.items():
             if field_def.auto_now_add and name not in prepared:
@@ -548,7 +557,7 @@ class PostgreSQLConnector:
             count = await connector.update_all(
                 User,
                 where={"active": False},
-                data={"deleted_at": datetime.utcnow()},
+                data={"deleted_at": datetime.now(timezone.utc)},
             )
         """
         data = self._prepare_update_data(model, data)
@@ -563,7 +572,7 @@ class PostgreSQLConnector:
         """
         prepared = dict(data)
 
-        now = datetime.utcnow()
+        now = _utc_now()
         for name, field_def in model._fields.items():
             if field_def.auto_now:
                 prepared[name] = now
@@ -577,7 +586,7 @@ class PostgreSQLConnector:
             if not field_def or value is None or field_def.is_json:
                 continue
             # auto_now/auto_now_add are always framework-stamped as a real
-            # datetime (they map to a TIMESTAMP column regardless of the
+            # datetime (they map to a TIMESTAMPTZ column regardless of the
             # model declaring them `str`, which is the conventional way to
             # declare them in this ORM) — trust our own stamp rather than
             # validate it against the model's annotation.
@@ -662,7 +671,7 @@ class PostgreSQLConnector:
         Always a real `DELETE` — this connector has no opinion on soft
         delete; that's application policy, not a query-library concern. If
         you want it, filter/stamp a `deleted_at`-style column yourself
-        (e.g. `update_all(Model, where, {"deleted_at": datetime.utcnow()})`
+        (e.g. `update_all(Model, where, {"deleted_at": datetime.now(timezone.utc)})`
         and add `{"deleted_at": None}` to your own read filters) — it's a
         few lines in your own code, not something worth a framework hook.
 

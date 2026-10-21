@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -36,7 +36,7 @@ async def test_create_does_not_mutate_the_callers_dict(connector, table):
 
 @pytest.mark.asyncio
 async def test_create_stamps_auto_now_like_upsert_does(connector, table):
-    before = datetime.utcnow()
+    before = datetime.now(timezone.utc)
     doc = await connector.create(StampedDoc, {"title": "a"})
     assert isinstance(doc.updated_at, datetime)
     assert doc.updated_at >= before.replace(microsecond=0)

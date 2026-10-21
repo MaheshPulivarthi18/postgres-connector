@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional, Type, Dict, List, Tuple, TYPE_CHECKING
 
 from .types import ColumnInfo, FieldDefinition
@@ -105,7 +105,7 @@ class Migrator:
         if not os.path.exists(directory):
             os.makedirs(directory)
             
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         version = f"{timestamp}_auto"
         up_filename = f"{version}_up.sql"
         down_filename = f"{version}_down.sql"
@@ -281,12 +281,24 @@ class Migrator:
         db_type = db_col.data_type.upper()
 
         if not self._types_match(expected_type, db_type, db_col):
-            up_queries.append(f'ALTER TABLE "{table_name}" ALTER COLUMN "{field.name}" TYPE {expected_type}')
-            # Restore original type
-            original_type = db_type
-            if db_type == "CHARACTER VARYING" and db_col.character_maximum_length:
-                original_type = f"VARCHAR({db_col.character_maximum_length})"
-            down_queries.append(f'ALTER TABLE "{table_name}" ALTER COLUMN "{field.name}" TYPE {original_type}')
+            if expected_type == "TIMESTAMPTZ" and db_type.replace(" ", "") == "TIMESTAMPWITHOUTTIMEZONE":
+                # auto_now / auto_now_add columns created as TIMESTAMP hold the
+                # ORM's naive UTC stamps; read them as UTC, not as the session's
+                # time zone, so existing values keep their instant.
+                col = f'"{field.name}"'
+                up_queries.append(
+                    f'ALTER TABLE "{table_name}" ALTER COLUMN {col} TYPE TIMESTAMPTZ USING {col} AT TIME ZONE \'UTC\''
+                )
+                down_queries.append(
+                    f'ALTER TABLE "{table_name}" ALTER COLUMN {col} TYPE TIMESTAMP USING {col} AT TIME ZONE \'UTC\''
+                )
+            else:
+                up_queries.append(f'ALTER TABLE "{table_name}" ALTER COLUMN "{field.name}" TYPE {expected_type}')
+                # Restore original type
+                original_type = db_type
+                if db_type == "CHARACTER VARYING" and db_col.character_maximum_length:
+                    original_type = f"VARCHAR({db_col.character_maximum_length})"
+                down_queries.append(f'ALTER TABLE "{table_name}" ALTER COLUMN "{field.name}" TYPE {original_type}')
 
         # --- Nullable change detection ---
         expected_nullable = field.nullable
@@ -371,7 +383,7 @@ class Migrator:
         if field.is_json:
             return "JSONB"
         if field.auto_now or field.auto_now_add:
-            return "TIMESTAMP"
+            return "TIMESTAMPTZ"
         if field.python_type == str and field.max_length:
             return f"VARCHAR({field.max_length})"
         return TYPE_MAP.get(field.python_type, "VARCHAR(255)")
@@ -414,6 +426,8 @@ class Migrator:
         # TIMESTAMP variants
         if expected_upper == "TIMESTAMP":
             return db_upper in ("TIMESTAMP", "TIMESTAMPWITHOUTTIMEZONE")
+        if expected_upper == "TIMESTAMPTZ":
+            return db_upper in ("TIMESTAMPTZ", "TIMESTAMPWITHTIMEZONE")
 
         return False
 
@@ -528,7 +542,7 @@ class Migrator:
 
         if field.is_json: pg_type = "JSONB"
         elif field.python_type == str and field.max_length: pg_type = f"VARCHAR({field.max_length})"
-        elif field.auto_now or field.auto_now_add: pg_type = "TIMESTAMP"
+        elif field.auto_now or field.auto_now_add: pg_type = "TIMESTAMPTZ"
 
         parts = [f'"{field.name}"', pg_type]
 

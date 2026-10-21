@@ -345,7 +345,7 @@ class Post(PostgreSQLModel):
     title:      str
     deleted_at: str = Field(nullable=True)
 
-await connector.update_by_id(Post, 1, {"deleted_at": datetime.utcnow()})
+await connector.update_by_id(Post, 1, {"deleted_at": datetime.now(timezone.utc)})
 await connector.find(Post, {"where": {"deleted_at": None}})
 ```
 

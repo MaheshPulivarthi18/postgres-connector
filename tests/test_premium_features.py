@@ -1,6 +1,6 @@
 import pytest
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from postgres_connector import PostgreSQLModel, Field, JSONField
 from postgres_connector.exceptions import QueryError
 from postgres_connector.query_builder import QueryBuilder
@@ -137,7 +137,7 @@ def _build_insert_payload(model, data):
     """Helper: replicate the final_data filtering logic from connector.create()."""
     for name, field_def in model._fields.items():
         if field_def.auto_now_add and name not in data:
-            data[name] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            data[name] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     instance = model(**data)
     final_data = {
         name: getattr(instance, name)
