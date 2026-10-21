@@ -106,16 +106,73 @@ def _merge_includes(scopes: List[IncludeScope]) -> List[IncludeScope]:
 _FILTER_KEYS = ("where", "order", "limit", "skip", "fields", "include")
 
 
+def _norm_int(name: str, value: Any) -> Optional[int]:
+    """Coerce a `limit`/`skip` that arrived as an integer string, or refuse it.
+
+    JSON from API clients sends query parameters as strings ("10"), which used
+    to reach the query builder and crash as a raw TypeError in SQL text. The
+    value is now an int before it leaves the filter parse, and anything that is
+    not a non-negative integer is a QueryError the caller can map to HTTP 400.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        if isinstance(value, str):
+            try:
+                value = int(value.strip())
+            except ValueError:
+                raise QueryError(
+                    f"'{name}' must be a non-negative integer, got {value!r}."
+                ) from None
+        else:
+            raise QueryError(
+                f"'{name}' must be a non-negative integer, got {value!r}."
+            )
+    if value < 0:
+        raise QueryError(
+            f"'{name}' must be a non-negative integer, got {value!r}."
+        )
+    return int(value)
+
+
+def _norm_fields(fields: Any) -> Optional[List[str]]:
+    """Normalise the two LoopBack `Fields` shapes to a list of column names.
+
+    LoopBack accepts `fields` as an array or as `{name: bool}`, where a `false`
+    value excludes the field. The dict was previously iterated by key only, so
+    excluded fields were selected anyway; now only the truthy keys remain.
+    """
+    if fields is None or isinstance(fields, (list, tuple)):
+        return fields
+    if isinstance(fields, dict):
+        selected = [str(name) for name, include in fields.items() if include]
+        if not selected:
+            raise QueryError(
+                "'fields' object selects no field; at least one key must be true."
+            )
+        return selected
+    raise QueryError(
+        f"'fields' must be a list of names or an object of name: bool, "
+        f"got {type(fields).__name__}."
+    )
+
+
 def _dict_to_filter(d: Dict) -> FilterOptions:
     unknown = sorted(set(d) - set(_FILTER_KEYS))
     if unknown:
         raise QueryError(f"Unknown filter key(s) {unknown}. Supported: {list(_FILTER_KEYS)}")
+    order = d.get("order")
+    if isinstance(order, str):
+        # LoopBack clients send a single "name DESC" string as one entry;
+        # iterating it character by character produced an error about a field
+        # called 'n'.
+        order = [order]
     return FilterOptions(
         where   = d.get("where"),
-        order   = d.get("order"),
-        limit   = d.get("limit"),
-        skip    = d.get("skip"),
-        fields  = d.get("fields"),
+        order   = order,
+        limit   = _norm_int("limit", d.get("limit")),
+        skip    = _norm_int("skip", d.get("skip")),
+        fields  = _norm_fields(d.get("fields")),
         include = d.get("include"),
     )
 
