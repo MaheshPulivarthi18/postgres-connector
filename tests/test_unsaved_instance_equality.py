@@ -8,12 +8,18 @@ compared equal and hashed identically.
 import pytest
 
 from postgres_connector import Field, PostgreSQLModel
+from postgres_connector.registry import registry
 
 
 class EqUser(PostgreSQLModel):
     __table__ = "eq_users"
     id:   int = Field(primary_key=True)
     name: str = Field()
+
+
+# These tests never touch the database. Models register at import (test collection),
+# so unregister now to keep other tests' migrate() from creating an eq_users table.
+registry.unregister("EqUser")
 
 
 def test_two_unsaved_instances_are_not_equal():
@@ -77,9 +83,12 @@ def test_eq_with_false_pk_of_other_model():
         id: int = Field(primary_key=True)
         name: str = Field()
 
-    p = EqUser(name="p")
-    o = OtherModel(name="o")
-    assert (p == o) is False
+    try:
+        p = EqUser(name="p")
+        o = OtherModel(name="o")
+        assert (p == o) is False
+    finally:
+        registry.unregister("OtherModel")
 
 
 def test_hash_is_usable_while_unsaved():
@@ -91,3 +100,11 @@ def test_hash_is_usable_while_unsaved():
     assert d[p] == "first"
     assert d[q] == "second"
     assert len(d) == 2
+
+
+def test_primary_key_given_to_the_constructor():
+    a, b = EqUser(id=7, name="a"), EqUser(id=7, name="b")
+    assert a == b
+    assert len({a, b}) == 1
+    assert EqUser(id=7, name="a") != EqUser(id=8, name="a")
+    assert EqUser(name="new") != EqUser(id=1, name="saved")
