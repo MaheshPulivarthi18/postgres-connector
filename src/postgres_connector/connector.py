@@ -481,7 +481,8 @@ class PostgreSQLConnector:
 
         now = datetime.utcnow()
 
-        # Normalize all records: apply auto_now_add, collect column set
+        # Normalize all records: apply auto_now_add and Python-side Field
+        # defaults (as create() does), collect column set
         all_columns: set = set()
         normalized: List[Dict[str, Any]] = []
         for data in records:
@@ -489,6 +490,8 @@ class PostgreSQLConnector:
             for name, field_def in model._fields.items():
                 if field_def.auto_now_add and name not in row:
                     row[name] = now
+                elif name not in row and name in model._field_defaults:
+                    row[name] = model._field_defaults[name]
             # Skip auto-increment PK if not provided
             for name, field_def in model._fields.items():
                 if field_def.auto_increment and name not in row:
@@ -510,7 +513,12 @@ class PostgreSQLConnector:
         for row in normalized:
             placeholders = []
             for col in columns:
-                val = row.get(col)
+                # A column some other record sets but this one omits gets the
+                # column's DEFAULT (serial id, server default) — not NULL.
+                if col not in row:
+                    placeholders.append("DEFAULT")
+                    continue
+                val = row[col]
                 param_idx += 1
                 placeholders.append(f"${param_idx}")
                 all_params.append(val)
