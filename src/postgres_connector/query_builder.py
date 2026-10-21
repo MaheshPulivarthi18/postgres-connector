@@ -267,6 +267,8 @@ class QueryBuilder:
 
         set_clause = ", ".join(set_parts)
         where_sql  = self._build_where_dict(where)
+        if not where_sql:
+            raise QueryError("UPDATE without a WHERE clause is not allowed. Pass at least {pk: value}.")
         sql = f'UPDATE "{self.table}" SET {set_clause} WHERE {where_sql}'
         if returning_all:
             sql += ' RETURNING *'
@@ -278,6 +280,8 @@ class QueryBuilder:
         self._params = []
         self._param_idx = 0
         where_sql = self._build_where_dict(where)
+        if not where_sql:
+            raise QueryError("DELETE without a WHERE clause is not allowed.")
         sql       = f'DELETE FROM "{self.table}" WHERE {where_sql}'
         return sql, list(self._params)
 
@@ -326,24 +330,38 @@ class QueryBuilder:
         return f"WHERE {sql}" if sql else ""
 
     def _build_where_dict(self, where: Dict[str, Any]) -> str:
+        """
+        Returns "" when `where` imposes no condition at all (e.g. `{}` or
+        `{"and": []}`) — callers treat that as "no WHERE clause".
+        """
         parts: List[str] = []
 
         for key, value in where.items():
             if key == "and":
                 if not isinstance(value, list):
                     raise QueryError("'and' clause must be a list of conditions.")
-                sub = " AND ".join(
-                    f"({self._build_where_dict(clause)})" for clause in value
-                )
-                parts.append(f"({sub})")
+                # Empty sub-clauses impose nothing, so they drop out; an
+                # empty list is the empty conjunction (always true).
+                subs = [s for s in (self._build_where_dict(clause) for clause in value) if s]
+                if subs:
+                    parts.append("(" + " AND ".join(f"({s})" for s in subs) + ")")
 
             elif key == "or":
                 if not isinstance(value, list):
                     raise QueryError("'or' clause must be a list of conditions.")
-                sub = " OR ".join(
-                    f"({self._build_where_dict(clause)})" for clause in value
-                )
-                parts.append(f"({sub})")
+                # An empty list is the empty disjunction (matches nothing,
+                # like `inq: []`); an empty member makes the whole OR true.
+                if not value:
+                    parts.append("FALSE")
+                    continue
+                mark = (len(self._params), self._param_idx)
+                subs = [self._build_where_dict(clause) for clause in value]
+                if all(subs):
+                    parts.append("(" + " OR ".join(f"({s})" for s in subs) + ")")
+                else:
+                    # Discarded members must not leave their params behind.
+                    del self._params[mark[0]:]
+                    self._param_idx = mark[1]
 
             elif isinstance(value, dict):
                 self._validate_field(key)
