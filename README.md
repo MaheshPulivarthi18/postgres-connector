@@ -111,6 +111,14 @@ await connector.find(User, {
 })
 ```
 
+An include can carry its own `scope` (`where`, `order`, `limit`, `skip`, `fields`, nested `include`). `limit`/`skip` apply **per parent**, so this loads each user's 5 most recent orders, still in one query per relation:
+
+```python
+users = await connector.find(User, {
+    "include": [{"relation": "orders", "scope": {"order": ["created_at DESC"], "limit": 5}}],
+})
+```
+
 ### Supported operators
 
 | Operator  | SQL equivalent     |
