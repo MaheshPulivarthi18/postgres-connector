@@ -32,6 +32,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, AsyncGenerator, Awaitable, Callable, Optional, Type, TypeVar, Union, Dict, List, Tuple
 
 try:
@@ -140,6 +141,21 @@ async def _translate_db_errors(timeout: Optional[float] = None):
         raise QueryTimeoutError(f"Query exceeded its timeout ({timeout}s)", timeout=timeout) from exc
     except asyncpg.exceptions.IntegrityConstraintViolationError as exc:  # type: ignore[union-attr]
         raise _translate_integrity_error(exc) from exc
+
+
+def _value_matches_type(value: Any, python_type: type) -> bool:
+    """
+    isinstance(), adjusted for numbers the way Python itself treats them:
+    a `float` field accepts int and Decimal too (asyncpg encodes both into
+    DOUBLE PRECISION losslessly enough — PEP 484 likewise lets int stand in
+    for float), while `bool` is rejected for numeric fields even though it
+    subclasses int — `True` silently stored as 1 is almost always a bug.
+    """
+    if python_type in (int, float) and isinstance(value, bool):
+        return False
+    if python_type is float:
+        return isinstance(value, (int, float, Decimal))
+    return isinstance(value, python_type)
 
 
 T = TypeVar("T")
@@ -639,7 +655,7 @@ class PostgreSQLConnector:
             # validate it against the model's annotation.
             if field_def.auto_now or field_def.auto_now_add:
                 continue
-            if not isinstance(value, field_def.python_type):
+            if not _value_matches_type(value, field_def.python_type):
                 raise ConfigurationError(f"Field '{name}' expects {field_def.python_type.__name__}, got {type(value).__name__}")
 
     # ── update_by_id ──────────────────────────────────────────────────────
