@@ -13,7 +13,7 @@ Built on [`asyncpg`](https://github.com/MagicStack/asyncpg) — the fastest Post
 - **Nested includes** — `"orders.items.product"` resolved in O(depth) queries, not O(N)
 - **4 relation types** — `hasOne`, `hasMany`, `belongsTo`, `hasManyThrough`
 - **Schema migrations** — additive-only `migrate()` syncs your models to the database
-- **Hooks** — `before_create`/`after_create` (`create()`), `before_update`/`after_update` (`update_by_id()`), `before_delete` (`delete_by_id()`); bulk `create_many`/`update_all`/`delete_all` skip them. Raising from a `before_*` hook aborts the write
+- **Hooks** — `before_create`/`after_create` (`create()`), `before_update`/`after_update` (`update_by_id()`), `before_delete`/`after_delete` (`delete_by_id()`), as methods or registered with `Model.observe(event, fn)`; bulk `create_many`/`update_all`/`delete_all` skip them. Raising from a `before_*` hook aborts the write
 - **Transactions** — `begin()` with nested savepoints
 - **Fault tolerant** — reads auto-retry through transient connection failures (DB restart, network blip); writes never blind-retry
 - **Timeouts** — configurable default per-query timeout, plus a per-call override on `raw()`/`raw_execute()`; a timeout is never mistaken for a retryable connection failure
@@ -174,6 +174,23 @@ class Order(TimestampMixin, PostgreSQLModel):
 ```
 
 A mixin's `Field(...)` options, `Relation(...)`s and hook methods apply to every model that inherits it.
+
+## Hooks
+
+Write a hook as a method on the model (or on a mixin), or register any number with `observe()`. The method runs first, then observers in registration order. Observers on a model also apply to its subclasses.
+
+```python
+class Order(PostgreSQLModel):
+    ...
+    async def before_create(self):
+        self.reference = new_reference()
+
+@Order.observe("after_delete")
+async def audit(order):
+    await write_audit_log("deleted", order.id)
+```
+
+Events: `before_create`, `after_create`, `before_update` (also receives the `data` being set, which it may change), `after_update`, `before_delete`, `after_delete`. Raising from a `before_*` hook aborts the write.
 
 ## Upsert
 

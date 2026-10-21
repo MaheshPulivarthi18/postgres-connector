@@ -600,9 +600,10 @@ class PostgreSQLConnector:
         one round trip via `UPDATE ... RETURNING *` (previously an UPDATE
         followed by a separate SELECT).
 
-        If the model overrides `before_update`/`after_update`, the current
-        row is loaded first so `before_update(data)` can run on it (and
-        mutate `data`), and `after_update()` runs on the updated row. Returns
+        If the model has `before_update`/`after_update` hooks (methods or
+        observers), the current row is loaded first so `before_update(data)`
+        can run on it (and mutate `data`), and `after_update()` runs on the
+        updated row. Returns
         None without firing hooks if no row has that PK. Inside a
         transaction (`session=` / `begin()`) the row is loaded `FOR UPDATE`,
         so it can't change between the hook and the UPDATE; outside one,
@@ -614,7 +615,7 @@ class PostgreSQLConnector:
         pk = self._require_pk(model)
         data = dict(data)
 
-        has_hooks = model._overrides_hook("before_update") or model._overrides_hook("after_update")
+        has_hooks = model._has_hook("before_update") or model._has_hook("after_update")
         if has_hooks:
             current = await self._load_for_hook(model, id, session)
             if current is None:
@@ -683,22 +684,26 @@ class PostgreSQLConnector:
         """
         Delete a record by PK. Returns True if a row was deleted.
 
-        If the model overrides `before_delete`, the row is loaded first
-        (`FOR UPDATE` inside a transaction, as in update_by_id) and the hook
-        runs on it before the DELETE (returns False without firing it if no
-        row has that PK).
+        If the model has `before_delete`/`after_delete` hooks (methods or
+        observers), the row is loaded first (`FOR UPDATE` inside a
+        transaction, as in update_by_id): `before_delete` runs on it before
+        the DELETE and `after_delete` after it. Returns False without firing
+        either if no row has that PK.
 
         Example:
             deleted = await connector.delete_by_id(User, 42)
         """
         pk = self._require_pk(model)
-        if model._overrides_hook("before_delete"):
+        current = None
+        if model._has_hook("before_delete") or model._has_hook("after_delete"):
             current = await self._load_for_hook(model, id, session)
             if current is None:
                 return False
             await current._trigger_hook("before_delete")
 
         affected = await self.delete_all(model, {pk: id}, session=session)
+        if affected and current is not None:
+            await current._trigger_hook("after_delete")
         return affected > 0
 
     # ── count / exists ────────────────────────────────────────────────────
