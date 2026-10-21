@@ -139,12 +139,8 @@ class Migrator:
                 with open(filepath, "r") as file:
                     sql_content = file.read()
                     
-                statements = [s.strip() for s in sql_content.split(';') if s.strip()]
-                
                 async with self._pool.transaction() as conn:
-                    for stmt in statements:
-                        self._pool.log_query(stmt)
-                        await conn.execute(stmt)
+                    await self._run_script(conn, sql_content)
                     await conn.execute("INSERT INTO schema_migrations (version) VALUES ($1)", version)
                         
                 logger.info(f"Applied migration: {version}")
@@ -177,16 +173,25 @@ class Migrator:
         with open(filepath, "r") as file:
             sql_content = file.read()
 
-        statements = [s.strip() for s in sql_content.split(';') if s.strip()]
-
         async with self._pool.transaction() as conn:
-            for stmt in statements:
-                self._pool.log_query(stmt)
-                await conn.execute(stmt)
+            await self._run_script(conn, sql_content)
             await conn.execute("DELETE FROM schema_migrations WHERE version = $1", version)
 
         logger.info(f"Rolled back migration: {version}")
         return 1
+
+    async def _run_script(self, conn: Any, sql_content: str) -> None:
+        """
+        Run a migration file exactly as written. A parameterless execute()
+        goes through Postgres's simple-query protocol, which accepts many
+        statements at once and parses them itself — so `;` inside function
+        bodies, string literals and comments is handled correctly (splitting
+        the text on ';' here would cut those statements apart).
+        """
+        if not sql_content.strip():
+            return
+        self._pool.log_query(sql_content)
+        await conn.execute(sql_content)
 
     async def _get_db_schema(self, db_name: str) -> Dict[str, Dict[str, ColumnInfo]]:
         sql = """
