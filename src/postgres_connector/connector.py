@@ -33,7 +33,7 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Awaitable, Callable, Optional, Type, TypeVar, Union, Dict, List, Tuple
+from typing import Any, Optional, Type, Union, Dict, List, Tuple
 
 try:
     import asyncpg
@@ -50,7 +50,6 @@ from .migrator import Migrator
 from .exceptions import (
     QueryError,
     ConfigurationError,
-    TransactionError,
     QueryTimeoutError,
     IntegrityError,
     UniqueConstraintError,
@@ -61,20 +60,12 @@ from .exceptions import (
 
 logger = logging.getLogger(__name__)
 
-# SQLSTATEs worth retrying a transaction for — both indicate the transaction
-# was aborted purely due to concurrent contention, not a real data problem.
-_RETRYABLE_SQLSTATES = {
-    "40001",  # serialization_failure (SERIALIZABLE isolation)
-    "40P01",  # deadlock_detected
-}
-
 # Exception types indicating the connection itself failed (DB restart, network
 # blip, connection recycled) rather than the query being wrong. Verified
 # empirically against a real Postgres instance: killing the DB mid-connect
 # surfaces a raw ConnectionRefusedError, while killing it under an already-open
 # connection surfaces asyncpg.exceptions.InterfaceError ("connection is closed").
-# Neither of those is an asyncpg.PostgresError with a sqlstate, so they need
-# their own check everywhere _RETRYABLE_SQLSTATES is consulted.
+# Read queries (find/count/exists) retry on these — see _fetch().
 #
 # Deliberately ConnectionError, NOT the broader OSError: ConnectionRefusedError/
 # ConnectionResetError/ConnectionAbortedError/BrokenPipeError are all
@@ -155,9 +146,6 @@ def _value_matches_type(value: Any, python_type: type) -> bool:
     if python_type is float:
         return isinstance(value, (int, float, Decimal))
     return isinstance(value, python_type)
-
-
-T = TypeVar("T")
 
 
 class PostgreSQLConnector:
@@ -810,9 +798,7 @@ class PostgreSQLConnector:
 
         Args:
             isolation:  "read_committed" (default), "repeatable_read", or
-                        "serializable". Use "serializable" together with
-                        `run_transaction()` for automatic retry on
-                        conflicting concurrent writes.
+                        "serializable".
             readonly:   Mark the transaction READ ONLY.
             deferrable: Only meaningful with isolation="serializable" and
                         readonly=True — lets Postgres delay the snapshot to
@@ -829,10 +815,6 @@ class PostgreSQLConnector:
         Nested `async with tx.begin():` blocks use SAVEPOINTs, so a nested
         block can roll back independently without aborting the whole
         transaction. See `TransactionContext.begin()`.
-
-        This does NOT retry on serialization failures / deadlocks — the
-        `async with` body only runs once. Use `run_transaction()` if you
-        need automatic retry.
         """
         return self._begin_ctx(isolation=isolation, readonly=readonly, deferrable=deferrable)
 
@@ -840,73 +822,6 @@ class PostgreSQLConnector:
     async def _begin_ctx(self, *, isolation, readonly, deferrable):
         async with self._pool.transaction(isolation=isolation, readonly=readonly, deferrable=deferrable) as conn:
             yield TransactionContext(self, conn)
-
-    async def run_transaction(
-        self,
-        func: Callable[[TransactionContext], Awaitable[T]],
-        *,
-        isolation:   Optional[str] = None,
-        readonly:    bool = False,
-        deferrable:  bool = False,
-        max_retries: int = 3,
-    ) -> T:
-        """
-        Run `func(tx)` inside a transaction, automatically retrying the
-        *entire callback* on serialization failures / deadlocks — the two
-        failure modes concurrent transactions are expected to hit under
-        contention, especially with isolation="serializable".
-
-        This is the "intelligent" transaction entry point: prefer it over
-        `begin()` whenever the transaction body is idempotent (safe to
-        re-run from scratch) and might race with other writers.
-
-        Args:
-            func:        async callable taking a `TransactionContext`.
-                         Must be safe to call more than once — no side
-                         effects outside the database (e.g. don't send an
-                         email from inside `func`; do it after this
-                         returns).
-            max_retries: total attempts before giving up (default 3).
-
-        Raises:
-            TransactionError: if all attempts are exhausted, or a non
-                              retryable database error occurs. The original
-                              exception is chained via `__cause__`.
-
-        Example:
-            async def transfer(tx):
-                sender = await tx.find_by_id(Account, sender_id)
-                if sender.balance < amount:
-                    raise InsufficientFundsError()
-                await tx.update_by_id(Account, sender_id, {"balance": sender.balance - amount})
-                receiver = await tx.find_by_id(Account, receiver_id)
-                await tx.update_by_id(Account, receiver_id, {"balance": receiver.balance + amount})
-
-            await connector.run_transaction(transfer, isolation="serializable")
-        """
-        last_exc: Optional[BaseException] = None
-
-        for attempt in range(1, max_retries + 1):
-            try:
-                async with self.begin(isolation=isolation, readonly=readonly, deferrable=deferrable) as tx:
-                    return await func(tx)
-            except (asyncpg.PostgresError, *_RETRYABLE_CONNECTION_ERRORS) as exc:  # type: ignore[union-attr]
-                last_exc = exc
-                sqlstate = getattr(exc, "sqlstate", None)
-                is_retryable = sqlstate in _RETRYABLE_SQLSTATES or isinstance(exc, _RETRYABLE_CONNECTION_ERRORS)
-                if not is_retryable or attempt == max_retries:
-                    raise TransactionError(
-                        f"Transaction failed after {attempt} attempt(s): {exc}"
-                    ) from exc
-                wait = min(0.05 * (2 ** (attempt - 1)), 1.0)
-                logger.warning(
-                    "Retrying transaction after %s (sqlstate=%s, attempt %d/%d)",
-                    exc.__class__.__name__, sqlstate, attempt, max_retries,
-                )
-                await asyncio.sleep(wait)
-
-        # Unreachable, but keeps type checkers happy.
-        raise TransactionError(f"Transaction failed: {last_exc}") from last_exc
 
     # ── Pool status ───────────────────────────────────────────────────────
 

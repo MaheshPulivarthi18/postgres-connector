@@ -1,8 +1,6 @@
-import asyncpg
 import pytest
 
 from postgres_connector import Field, PostgreSQLModel, TransactionContext
-from postgres_connector.exceptions import TransactionError
 from postgres_connector.registry import registry
 
 
@@ -90,95 +88,5 @@ async def test_nested_savepoint_rolls_back_independently(connector):
         rows = await connector.find(Account)
         names = {r.name for r in rows}
         assert names == {"outer"}  # inner's insert was rolled back, outer's stood
-    finally:
-        await _teardown(connector)
-
-
-@pytest.mark.asyncio
-async def test_run_transaction_retries_on_serialization_failure(connector):
-    await _setup(connector)
-    try:
-        attempts = 0
-
-        async def flaky(tx: TransactionContext):
-            nonlocal attempts
-            attempts += 1
-            if attempts < 3:
-                raise asyncpg.exceptions.SerializationError("simulated conflict")
-            return await tx.create(Account, {"name": "retried", "balance": 5})
-
-        result = await connector.run_transaction(flaky, max_retries=5)
-        assert attempts == 3
-        assert result.name == "retried"
-
-        count = await connector.count(Account)
-        assert count == 1  # only the successful attempt's insert survived
-    finally:
-        await _teardown(connector)
-
-
-@pytest.mark.asyncio
-async def test_run_transaction_retries_on_connection_error(connector):
-    """
-    Connection-level failures (asyncpg.exceptions.InterfaceError, OSError)
-    aren't asyncpg.PostgresError with a sqlstate — this proves the
-    broadened exception handling in run_transaction() actually catches and
-    retries them too, not just sqlstate-based serialization failures.
-    """
-    await _setup(connector)
-    try:
-        attempts = 0
-
-        async def flaky(tx: TransactionContext):
-            nonlocal attempts
-            attempts += 1
-            if attempts < 3:
-                raise asyncpg.exceptions.InterfaceError("connection is closed")
-            return await tx.create(Account, {"name": "reconnected", "balance": 1})
-
-        result = await connector.run_transaction(flaky, max_retries=5)
-        assert attempts == 3
-        assert result.name == "reconnected"
-
-        count = await connector.count(Account)
-        assert count == 1
-    finally:
-        await _teardown(connector)
-
-
-@pytest.mark.asyncio
-async def test_run_transaction_gives_up_after_max_retries(connector):
-    await _setup(connector)
-    try:
-        attempts = 0
-
-        async def always_conflicts(tx: TransactionContext):
-            nonlocal attempts
-            attempts += 1
-            raise asyncpg.exceptions.DeadlockDetectedError("simulated deadlock")
-
-        with pytest.raises(TransactionError):
-            await connector.run_transaction(always_conflicts, max_retries=3)
-
-        assert attempts == 3
-    finally:
-        await _teardown(connector)
-
-
-@pytest.mark.asyncio
-async def test_run_transaction_does_not_retry_non_retryable_errors(connector):
-    await _setup(connector)
-    try:
-        attempts = 0
-
-        async def bad_query(tx: TransactionContext):
-            nonlocal attempts
-            attempts += 1
-            await tx.raw("SELECT * FROM this_table_does_not_exist")
-
-        with pytest.raises(TransactionError):
-            await connector.run_transaction(bad_query, max_retries=5)
-
-        assert attempts == 1  # undefined_table is not in the retryable set
     finally:
         await _teardown(connector)

@@ -104,31 +104,6 @@ async def test_fast_query_under_a_tight_timeout_succeeds():
         await connector.disconnect()
 
 
-@pytest.mark.asyncio
-async def test_run_transaction_does_not_retry_a_timeout(connector):
-    """
-    A slow query inside run_transaction() must raise, not get the whole
-    callback retried. It propagates as QueryTimeoutError directly (already
-    translated by the time it reaches run_transaction()'s retry check,
-    which only matches PostgresError/connection errors — a query timeout
-    is neither, so it isn't caught, retried, or re-wrapped there).
-    """
-    attempts = 0
-
-    async def slow(tx):
-        nonlocal attempts
-        attempts += 1
-        await tx.raw("SELECT pg_sleep(2)", timeout=0.3)
-
-    start = time.monotonic()
-    with pytest.raises(QueryTimeoutError):
-        await connector.run_transaction(slow, max_retries=5)
-    elapsed = time.monotonic() - start
-
-    assert attempts == 1  # not retried
-    assert elapsed < 2  # well under 5 attempts worth of delay
-
-
 class TimeoutTestUser(PostgreSQLModel):
     __table__ = "timeout_test_users"
     id:   int = Field(primary_key=True)

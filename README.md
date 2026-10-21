@@ -14,7 +14,7 @@ Built on [`asyncpg`](https://github.com/MagicStack/asyncpg) — the fastest Post
 - **4 relation types** — `hasOne`, `hasMany`, `belongsTo`, `hasManyThrough`
 - **Schema migrations** — additive-only `migrate()` syncs your models to the database
 - **Hooks** — `before_create`/`after_create` (`create()`), `before_update`/`after_update` (`update_by_id()`), `before_delete` (`delete_by_id()`); bulk `create_many`/`update_all`/`delete_all` skip them. Raising from a `before_*` hook aborts the write
-- **Transactions** — `begin()`/`run_transaction()` with nested savepoints and automatic retry on serialization failures/deadlocks
+- **Transactions** — `begin()` with nested savepoints
 - **Fault tolerant** — reads auto-retry through transient connection failures (DB restart, network blip); writes never blind-retry
 - **Timeouts** — configurable default per-query timeout, plus a per-call override on `raw()`/`raw_execute()`; a timeout is never mistaken for a retryable connection failure
 - **Typed error mapping** — unique/FK/not-null/check violations become `UniqueConstraintError`/etc., not raw `asyncpg` exceptions
@@ -203,22 +203,6 @@ async with connector.begin() as tx:
 
 Nested `async with tx.begin():` blocks use PostgreSQL SAVEPOINTs, so a nested block can fail and roll back on its own without aborting the outer transaction.
 
-**`connector.run_transaction(func, ...)`** — like `begin()`, but retries the whole callback automatically on serialization failures / deadlocks (the two failure modes concurrent transactions hit under contention). Use this with `isolation="serializable"` for money-movement / inventory-decrement style logic where two transactions might otherwise race:
-
-```python
-async def transfer(tx):
-    sender = await tx.find_by_id(Account, sender_id)
-    if sender.balance < amount:
-        raise InsufficientFundsError()
-    await tx.update_by_id(Account, sender_id, {"balance": sender.balance - amount})
-    receiver = await tx.find_by_id(Account, receiver_id)
-    await tx.update_by_id(Account, receiver_id, {"balance": receiver.balance + amount})
-
-await connector.run_transaction(transfer, isolation="serializable")
-```
-
-`func` must be safe to call more than once (no side effects outside the database) since a conflicting concurrent transaction causes it to be retried from scratch. After `max_retries` attempts it raises `TransactionError` with the original database error chained via `__cause__`.
-
 ## Fault Tolerance
 
 Transient connection failures — a DB restart, a network blip, a connection getting recycled — are automatically retried, with exponential backoff, up to `max_query_retries` (default 3, pass `max_query_retries=0` to disable):
@@ -231,7 +215,6 @@ connector = PostgreSQLConnector(host="...", database="...", max_query_retries=5)
 
 - `find()` / `find_one()` / `find_by_id()` / `count()` / `exists()` retry automatically.
 - `create()` / `create_many()` / `update_all()` / `update_by_id()` / `delete_all()` / `delete_by_id()` / `upsert()` / `raw()` / `raw_execute()` never auto-retry — a connection failure there raises immediately.
-- Inside `run_transaction()`, the *whole callback* retries on a connection failure too (in addition to the existing serialization-failure/deadlock retry) — safe, because nothing committed if the connection never confirmed it.
 
 A timed-out query is deliberately **not** treated as a retryable connection failure — see Timeouts below for why.
 
