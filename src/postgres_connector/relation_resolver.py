@@ -330,7 +330,9 @@ class RelationResolver:
             if scope.scope and scope.scope.include:
                 await self.resolve(targets, scope.scope.include, target_cls)
 
-            # Step 4: Stitch via junction table
+            # Step 4: Stitch via junction table, keeping the target query's
+            # order (scope "order"), then apply scope skip/limit per parent.
+            target_rank  = {t.__dict__.get(target_pk): i for i, t in enumerate(targets)}
             target_by_pk = {t.__dict__.get(target_pk): t for t in targets}
             parent_to_targets: dict = {pid: [] for pid in parent_ids}
 
@@ -340,6 +342,14 @@ class RelationResolver:
                 target_obj = target_by_pk.get(target_fk)
                 if target_obj and parent_fk in parent_to_targets:
                     parent_to_targets[parent_fk].append(target_obj)
+
+            opts = scope.scope
+            skip = (opts.skip if opts else None) or 0
+            limit = opts.limit if opts else None
+            for pid, items in parent_to_targets.items():
+                if opts and opts.order:
+                    items.sort(key=lambda t: target_rank[t.__dict__.get(target_pk)])
+                parent_to_targets[pid] = items[skip:None if limit is None else skip + limit]
 
             for parent in parents:
                 pk_val = parent.__dict__.get(parent_pk)
