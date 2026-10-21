@@ -103,3 +103,81 @@ async def test_models_without_hooks_skip_the_extra_load(connector, tables):
         del connector._fetch
 
     assert len(fetches) == 1 and fetches[0].startswith("UPDATE")
+
+
+@pytest.mark.asyncio
+async def test_hook_load_locks_the_row_inside_a_transaction(connector, table_fetches):
+    note = await connector.create(HookedNote, {"body": "old"})
+    async with connector.begin() as tx:
+        await tx.update_by_id(HookedNote, note.id, {"body": "new"})
+        await tx.delete_by_id(HookedNote, note.id)
+    loads = [sql for sql in table_fetches if sql.startswith("SELECT")]
+    assert len(loads) == 2 and all(sql.endswith("FOR UPDATE") for sql in loads)
+
+
+@pytest.mark.asyncio
+async def test_hook_load_takes_no_lock_outside_a_transaction(connector, table_fetches):
+    note = await connector.create(HookedNote, {"body": "old"})
+    await connector.update_by_id(HookedNote, note.id, {"body": "new"})
+    loads = [sql for sql in table_fetches if sql.startswith("SELECT")]
+    assert len(loads) == 1 and "FOR UPDATE" not in loads[0]
+
+
+@pytest.fixture
+async def table_fetches(connector, tables):
+    fetches = []
+    real_fetch = connector._fetch
+
+    async def recording_fetch(*args, **kwargs):
+        fetches.append(args[0])
+        return await real_fetch(*args, **kwargs)
+
+    connector._fetch = recording_fetch
+    yield fetches
+    del connector._fetch
+
+
+class GatedNote(PostgreSQLModel):
+    __table__ = "gated_notes"
+    id:   int = Field(primary_key=True)
+    body: str = Field()
+
+    in_hook = None   # asyncio.Event, set per test
+    release = None
+
+    async def before_update(self, data):
+        GatedNote.in_hook.set()
+        await GatedNote.release.wait()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_writer_cannot_change_the_row_while_a_hook_runs(connector):
+    import asyncio
+    from postgres_connector import PostgreSQLConnector
+
+    await connector.raw_execute('DROP TABLE IF EXISTS "gated_notes"')
+    await connector.migrate()
+    note = await connector.create(GatedNote, {"body": "v1"})
+    GatedNote.in_hook, GatedNote.release = asyncio.Event(), asyncio.Event()
+    other = PostgreSQLConnector(**connector._pool._connect_kwargs, minsize=1, maxsize=1)
+    await other.connect()
+    try:
+        async def tx_a():
+            async with connector.begin() as tx:
+                return await tx.update_by_id(GatedNote, note.id, {"body": "from-a"})
+
+        task = asyncio.ensure_future(tx_a())
+        await asyncio.wait_for(GatedNote.in_hook.wait(), timeout=5)
+
+        # While A's hook runs, a concurrent writer must wait for A's row lock.
+        with pytest.raises(Exception, match="lock timeout"):
+            async with other.begin() as tx_b:
+                await tx_b.raw_execute("SET LOCAL lock_timeout = '300ms'")
+                await tx_b.raw_execute('UPDATE "gated_notes" SET body = $1 WHERE id = $2', ["from-b", note.id])
+
+        GatedNote.release.set()
+        assert (await task).body == "from-a"
+    finally:
+        GatedNote.release.set()
+        await other.disconnect()
+        await connector.raw_execute('DROP TABLE IF EXISTS "gated_notes"')
