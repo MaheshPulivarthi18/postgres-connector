@@ -42,7 +42,6 @@ except ImportError:
 
 from .model import PostgreSQLModel
 from .pool import ConnectionPool
-from .procedures import Procedure, procedures
 from .query_builder import QueryBuilder
 from .relation_resolver import RelationResolver, _dict_to_filter, _parse_include
 from .transaction import TransactionContext
@@ -190,8 +189,8 @@ class PostgreSQLConnector:
                     Default seconds allowed per query on this connector
                     (default 30; None disables it). Exceeding it raises
                     QueryTimeoutError, not a bare TimeoutError. Override
-                    for one call via `timeout=` on raw()/raw_execute()/
-                    call() — everything else uses this default.
+                    for one call via `timeout=` on raw()/raw_execute() —
+                    everything else uses this default.
     """
 
     def __init__(
@@ -852,89 +851,6 @@ class PostgreSQLConnector:
         just this call.
         """
         return await self._execute(sql, params, session=session, timeout=timeout)
-
-    # ── Stored procedures / functions ───────────────────────────────────────
-
-    async def call(
-        self,
-        proc: Union[str, Procedure],
-        session: Optional[Any] = None,
-        timeout: Optional[float] = None,
-        **kwargs: Any,
-    ) -> Any:
-        """
-        Call a registered Procedure (or look one up by name).
-
-        - `kind="function"` with `returns=Model` runs
-          `SELECT * FROM name(...)` and hands back a list of hydrated
-          model instances.
-        - `kind="function"` with no `returns` runs `SELECT name(...)` and
-          hands back the raw scalar value.
-        - `kind="procedure"` runs `CALL name(...)` and always returns None.
-
-        Every parameter declared on the Procedure must be passed as a
-        keyword argument — missing or unexpected ones raise QueryError
-        before anything is sent to the database. `timeout` overrides the
-        connector-wide command_timeout default for just this call — useful
-        for a procedure you know can run long.
-
-        Example:
-            add_numbers = Procedure("add_numbers", params=["a", "b"])
-            total = await connector.call(add_numbers, a=2, b=3)
-            total = await connector.call("add_numbers", a=2, b=3)  # by name
-        """
-        procedure = procedures.get(proc) if isinstance(proc, str) else proc
-
-        missing = [p for p in procedure.params if p not in kwargs]
-        if missing:
-            raise QueryError(f"Missing arguments for procedure '{procedure.name}': {missing}")
-        extra = [k for k in kwargs if k not in procedure.params]
-        if extra:
-            raise QueryError(f"Unknown arguments for procedure '{procedure.name}': {extra}")
-
-        values = [kwargs[p] for p in procedure.params]
-        placeholders = ", ".join(f"${i + 1}" for i in range(len(values)))
-
-        if procedure.kind == "procedure":
-            await self._execute(f'CALL "{procedure.name}"({placeholders})', values, session=session, timeout=timeout)
-            return None
-
-        if procedure.returns is not None:
-            rows = await self._fetch(f'SELECT * FROM "{procedure.name}"({placeholders})', values, session=session, timeout=timeout)
-            return [procedure.returns._from_row(r) for r in rows]
-
-        rows = await self._fetch(f'SELECT "{procedure.name}"({placeholders}) AS result', values, session=session, timeout=timeout)
-        return rows[0]["result"] if rows else None
-
-    async def sync_procedures(self, session: Optional[Any] = None) -> int:
-        """
-        Create/replace every registered Procedure that declared a `body`,
-        running each one's SQL exactly as written — nothing is generated
-        or inferred, this just executes what you wrote. Procedures with no
-        `body` are calling-only bindings for something that must already
-        exist in the database, and are skipped here.
-
-        Deliberately separate from migrate() — that's schema (tables,
-        columns, indexes), this is executable code. Write `body` as
-        `CREATE OR REPLACE FUNCTION/PROCEDURE ...` so this is safe to run
-        repeatedly (e.g. on every app startup), the same way migrate() is.
-        This never drops a procedure that's no longer registered — same
-        additive-only philosophy as migrate() never dropping a column.
-
-        Returns the number of procedures (re)created.
-
-        Example:
-            registry.register(...)   # models, if using migrate() too
-            await connector.migrate()          # schema
-            await connector.sync_procedures()  # functions/procedures
-        """
-        count = 0
-        for procedure in procedures.all().values():
-            if procedure.body is None:
-                continue
-            await self.raw_execute(procedure.body, session=session)
-            count += 1
-        return count
 
     # ── Transactions ──────────────────────────────────────────────────────
 

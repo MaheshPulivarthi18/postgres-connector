@@ -16,10 +16,9 @@ Built on [`asyncpg`](https://github.com/MagicStack/asyncpg) — the fastest Post
 - **Hooks** — `before_create`/`after_create` (`create()`), `before_update`/`after_update` (`update_by_id()`), `before_delete` (`delete_by_id()`); bulk `create_many`/`update_all`/`delete_all` skip them. Raising from a `before_*` hook aborts the write
 - **Transactions** — `begin()`/`run_transaction()` with nested savepoints and automatic retry on serialization failures/deadlocks
 - **Fault tolerant** — reads auto-retry through transient connection failures (DB restart, network blip); writes never blind-retry
-- **Timeouts** — configurable default per-query timeout, plus a per-call override on `raw()`/`raw_execute()`/`call()`; a timeout is never mistaken for a retryable connection failure
+- **Timeouts** — configurable default per-query timeout, plus a per-call override on `raw()`/`raw_execute()`; a timeout is never mistaken for a retryable connection failure
 - **Typed error mapping** — unique/FK/not-null/check violations become `UniqueConstraintError`/etc., not raw `asyncpg` exceptions
 - **Row locking** — `FOR UPDATE`/`FOR SHARE`/`SKIP LOCKED` in the filter DSL
-- **Stored procedures** — declare once with `Procedure(...)`, call typed everywhere via `connector.call(...)`; `sync_procedures()` creates/replaces them in the DB from your exact SQL
 - **Upsert** — `INSERT ... ON CONFLICT DO UPDATE`/`DO NOTHING` in one round trip
 - **Streaming** — `stream()` reads large result sets through a server-side cursor, bounded memory
 - **JSONB support** — `JSONField` for dict/list columns with auto serialization
@@ -265,12 +264,11 @@ connector = PostgreSQLConnector(
 )
 ```
 
-Override it for one call via `timeout=` on the three methods where "this specific call needs a different budget" is most likely to matter — a slow report query, a long-running procedure:
+Override it for one call via `timeout=` on `raw()`/`raw_execute()`, where "this specific call needs a different budget" is most likely to matter — a slow report query, a maintenance statement:
 
 ```python
 rows = await connector.raw("SELECT ... /* big report */", timeout=120.0)
 await connector.raw_execute("VACUUM ANALYZE big_table", timeout=300.0)
-result = await connector.call(some_slow_procedure, timeout=60.0, ...)
 ```
 
 (Not exposed on `find`/`create`/`update_by_id`/etc. — those use the connector-wide `command_timeout` default; use `raw()`/`raw_execute()` if one of them specifically needs a different budget.) Exceeding a timeout raises `QueryTimeoutError`, not a bare `TimeoutError` — same motivation as the typed constraint-violation errors below: one `@app.exception_handler(QueryTimeoutError)` instead of every route guessing what a bare `TimeoutError` means.
@@ -348,51 +346,6 @@ rows = await connector.raw(
 affected = await connector.raw_execute("DELETE FROM sessions WHERE expired = $1", [True])
 ```
 
-## Stored Procedures & Functions
-
-Declare a Postgres function or procedure once with `Procedure(...)`, call it through the same typed API everywhere — no hand-written SQL, no manual result-row hydration. Declaring a `Procedure` auto-registers it (like models do), so it can also be called later by its string name.
-
-```python
-from postgres_connector import Procedure
-
-# Scalar function: SELECT add_numbers($1, $2)
-add_numbers = Procedure("add_numbers", params=["a", "b"])
-
-# Table-returning function: SELECT * FROM get_active_users()
-get_active_users = Procedure("get_active_users", returns=User)
-
-# Procedure (no return value): CALL bump_counter($1)
-bump_counter = Procedure("bump_counter", params=["p_id"], kind="procedure")
-
-total = await connector.call(add_numbers, a=2, b=3)     # -> 5
-users = await connector.call(get_active_users)           # -> [User, User, ...]
-await connector.call(bump_counter, p_id=1)                # -> None, side effect only
-await connector.call("bump_counter", p_id=1)               # look up by registered name
-```
-
-Every parameter declared on a `Procedure` must be passed as a keyword argument to `call()` — missing or unexpected ones raise `QueryError` before anything reaches the database. `kind="procedure"` doesn't support `OUT` parameters — use `connector.raw(...)` for those. `call()` is also available inside a transaction via `tx.call(...)`.
-
-### Actually creating the procedure in the database
-
-By itself, `Procedure(...)` is a *calling* binding — it doesn't create anything, it just describes how to call something that already exists (created via `psql`, a DBA-managed migration, whatever). To have this library create/replace it too, pass `body` — your exact `CREATE OR REPLACE FUNCTION`/`PROCEDURE` SQL, executed verbatim, nothing parsed or generated — then run `connector.sync_procedures()`:
-
-```python
-add_numbers = Procedure(
-    "add_numbers",
-    params=["a", "b"],
-    body="""
-        CREATE OR REPLACE FUNCTION add_numbers(a INT, b INT) RETURNS INT AS $$
-        BEGIN RETURN a + b; END;
-        $$ LANGUAGE plpgsql
-    """,
-)
-
-await connector.sync_procedures()   # creates/replaces every registered Procedure that has a body
-total = await connector.call(add_numbers, a=2, b=3)
-```
-
-`body` is optional and stays that way for procedures you don't want this library managing — those with no `body` are skipped entirely. Write `body` as `CREATE OR REPLACE` so `sync_procedures()` is safe to run repeatedly (e.g. every app startup), the same way `migrate()` is. Deliberately kept separate from `migrate()` — that's schema, this is executable code — and, like `migrate()`, never drops anything for a `Procedure` that's no longer registered.
-
 ## Debug mode
 
 ```python
@@ -419,7 +372,7 @@ await connector.find(Post, {"where": {"deleted_at": None}})
 
 ## Full-Feature Verification
 
-[`examples/full_feature_smoketest.py`](examples/full_feature_smoketest.py) seeds a large local dataset (5,000 customers, 20,000 orders, 2,000 jobs) and exercises every feature in this README against it end-to-end — bulk `create_many`, the filter DSL, zero-N+1 relation loading, upsert, transactions/savepoints, `SKIP LOCKED` row locking across concurrent workers, streaming cursors, stored procedures, delete, typed exception mapping, and query timeouts — printing a pass/fail line per feature:
+[`examples/full_feature_smoketest.py`](examples/full_feature_smoketest.py) seeds a large local dataset (5,000 customers, 20,000 orders, 2,000 jobs) and exercises every feature in this README against it end-to-end — bulk `create_many`, the filter DSL, zero-N+1 relation loading, upsert, transactions/savepoints, `SKIP LOCKED` row locking across concurrent workers, streaming cursors, delete, typed exception mapping, and query timeouts — printing a pass/fail line per feature:
 
 ```bash
 DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=postgres DB_PASSWORD=secret DB_NAME=smoketest \
