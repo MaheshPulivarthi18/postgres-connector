@@ -13,7 +13,7 @@ Built on [`asyncpg`](https://github.com/MagicStack/asyncpg) — the fastest Post
 - **Nested includes** — `"orders.items.product"` resolved in O(depth) queries, not O(N)
 - **4 relation types** — `hasOne`, `hasMany`, `belongsTo`, `hasManyThrough`
 - **Schema migrations** — additive-only `migrate()` syncs your models to the database
-- **Hooks** — `before_create`, `after_create`, `before_update`, etc.
+- **Hooks** — `before_create`/`after_create` (`create()`), `before_update`/`after_update` (`update_by_id()`), `before_delete` (`delete_by_id()`); bulk `create_many`/`update_all`/`delete_all` skip them. Raising from a `before_*` hook aborts the write
 - **Transactions** — `begin()`/`run_transaction()` with nested savepoints and automatic retry on serialization failures/deadlocks
 - **Fault tolerant** — reads auto-retry through transient connection failures (DB restart, network blip); writes never blind-retry
 - **Timeouts** — configurable default per-query timeout, plus a per-call override on `raw()`/`raw_execute()`/`call()`; a timeout is never mistaken for a retryable connection failure

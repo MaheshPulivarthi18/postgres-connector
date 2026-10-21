@@ -330,14 +330,19 @@ class PostgreSQLModel(metaclass=ModelMeta):
 
     # ── Hooks ─────────────────────────────────────────────────────────────
 
-    async def _trigger_hook(self, name: str) -> None:
+    async def _trigger_hook(self, name: str, *args: Any) -> None:
         """Helper to invoke an async hook if defined on the instance."""
         hook = getattr(self, name, None)
         if hook and callable(hook):
             if asyncio.iscoroutinefunction(hook):
-                await hook()
+                await hook(*args)
             else:
-                hook()
+                hook(*args)
+
+    @classmethod
+    def _overrides_hook(cls, name: str) -> bool:
+        """True if this model overrides the no-op base implementation of hook `name`."""
+        return getattr(cls, name) is not getattr(PostgreSQLModel, name)
 
     async def before_create(self) -> None:
         """Override in subclass: called before the INSERT query."""
@@ -348,15 +353,22 @@ class PostgreSQLModel(metaclass=ModelMeta):
         pass
 
     async def before_update(self, data: Dict[str, Any]) -> None:
-        """Override in subclass: called before the UPDATE query. Data can be mutated."""
+        """
+        Override in subclass: called by update_by_id() before the UPDATE,
+        on the row as it currently is. `data` (the fields about to be set)
+        can be mutated. Bulk update_all() does not fire hooks.
+        """
         pass
 
     async def after_update(self) -> None:
-        """Override in subclass: called after the UPDATE query."""
+        """Override in subclass: called by update_by_id() on the updated row."""
         pass
 
     async def before_delete(self) -> None:
-        """Override in subclass: called before DELETE query."""
+        """
+        Override in subclass: called by delete_by_id() before the DELETE, on
+        the row about to be deleted. Bulk delete_all() does not fire hooks.
+        """
         pass
 
     # ── Serialization ─────────────────────────────────────────────────────
