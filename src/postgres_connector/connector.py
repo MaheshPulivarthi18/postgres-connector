@@ -417,10 +417,14 @@ class PostgreSQLConnector:
             })
             print(user.id)   # populated
         """
-        # Handle auto_now_add fields
+        # Stamp auto_now_add (unless given) and auto_now — on a copy, so the
+        # caller's dict is never mutated. Same rules as upsert().
+        data = dict(data)
         now = datetime.utcnow()
         for name, field_def in model._fields.items():
             if field_def.auto_now_add and name not in data:
+                data[name] = now
+            if field_def.auto_now:
                 data[name] = now
 
         self._validate_field_types(model, data)
