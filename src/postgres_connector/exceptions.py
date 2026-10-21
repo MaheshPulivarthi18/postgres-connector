@@ -38,16 +38,6 @@ class ModelNotRegisteredError(ConnectorError):
         self.model_name = model_name
 
 
-class ProcedureNotRegisteredError(ConnectorError):
-    """Raised when calling a stored procedure/function by name that hasn't been registered."""
-    def __init__(self, proc_name: str):
-        super().__init__(
-            f"Procedure '{proc_name}' is not registered. "
-            f"Make sure it's declared with Procedure(...) and imported before use."
-        )
-        self.proc_name = proc_name
-
-
 class RelationNotDefinedError(ConnectorError):
     """Raised when trying to include a relation that doesn't exist on the model."""
     def __init__(self, relation_name: str, model_name: str):
@@ -88,7 +78,7 @@ class QueryTimeoutError(ConnectorError):
     """
     Raised when a query exceeds its timeout (either the connector-wide
     `command_timeout` default, or a per-call `timeout=` override on
-    raw()/raw_execute()/call()) — instead of a bare `TimeoutError`, which
+    raw()/raw_execute()) — instead of a bare `TimeoutError`, which
     could be confused with an unrelated asyncio timeout elsewhere in the
     app. A slow/hung query is deliberately NOT retried automatically (see
     fault tolerance docs) — retrying an already-slow query risks piling

@@ -18,7 +18,6 @@ from postgres_connector import (
     Field,
     PostgreSQLConnector,
     PostgreSQLModel,
-    Procedure,
     Relation,
 )
 from postgres_connector.exceptions import QueryTimeoutError, UniqueConstraintError
@@ -234,27 +233,6 @@ async def check_streaming(connector):
     check("stream(): connection released cleanly after completion", post_count == N_ORDERS)
 
 
-async def check_procedures(connector):
-    print("\n== Stored procedures (sync_procedures + call) ==")
-    count_orders_for_customer = Procedure(
-        "smoke_count_orders_for_customer",
-        params=["cust_id"],
-        body="""
-            CREATE OR REPLACE FUNCTION smoke_count_orders_for_customer(cust_id INT) RETURNS INT AS $$
-            BEGIN
-                RETURN (SELECT COUNT(*) FROM smoke_orders WHERE customer_id = cust_id);
-            END;
-            $$ LANGUAGE plpgsql
-        """,
-    )
-    synced = await connector.sync_procedures()
-    check("sync_procedures(): creates the function in the DB", synced >= 1)
-
-    row = (await connector.raw("SELECT customer_id, COUNT(*) AS n FROM smoke_orders GROUP BY customer_id ORDER BY n DESC LIMIT 1"))[0]
-    proc_result = await connector.call(count_orders_for_customer, cust_id=row["customer_id"])
-    check("call(): matches a direct COUNT(*) on real data", proc_result == row["n"], f"proc={proc_result} direct={row['n']}")
-
-
 async def check_delete(connector):
     print("\n== Delete at scale ==")
     # Soft delete is intentionally NOT a connector feature — it's
@@ -319,13 +297,11 @@ async def main():
         await check_transactions(connector, customer_ids)
         await check_row_locking(connector)
         await check_streaming(connector)
-        await check_procedures(connector)
         await check_delete(connector)
         await check_exception_mapping(connector)
         await check_timeouts(connector)
     finally:
         print("\n== Cleanup ==")
-        await connector.raw_execute("DROP FUNCTION IF EXISTS smoke_count_orders_for_customer")
         await connector.raw_execute("DROP TABLE IF EXISTS smoke_orders")
         await connector.raw_execute("DROP TABLE IF EXISTS smoke_customers")
         await connector.raw_execute("DROP TABLE IF EXISTS smoke_jobs")

@@ -25,7 +25,6 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, List, Optional, Type, TYPE_CHECKING, Union
 
-from .procedures import Procedure
 from .types import FilterOptions
 
 if TYPE_CHECKING:
@@ -150,12 +149,6 @@ class TransactionContext:
 
     async def raw_execute(self, sql: str, params: List[Any] = [], timeout: Optional[float] = None) -> int:
         return await self._connector.raw_execute(sql, params, session=self._conn, timeout=timeout)
-
-    async def call(self, proc: Union[str, Procedure], timeout: Optional[float] = None, **kwargs: Any) -> Any:
-        return await self._connector.call(proc, session=self._conn, timeout=timeout, **kwargs)
-
-    async def sync_procedures(self) -> int:
-        return await self._connector.sync_procedures(session=self._conn)
 
     # ── Nested transactions (savepoints) ────────────────────────────────────
 
