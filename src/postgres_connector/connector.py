@@ -353,6 +353,8 @@ class PostgreSQLConnector:
             })
             print(user.id)   # populated
         """
+        self._reject_unknown_fields(model, data)
+
         # Stamp auto_now_add (unless given) and auto_now — on a copy, so the
         # caller's dict is never mutated. Same rules as upsert().
         data = dict(data)
@@ -418,6 +420,8 @@ class PostgreSQLConnector:
         """
         if not records:
             return []
+        for data in records:
+            self._reject_unknown_fields(model, data)
 
         now = datetime.utcnow()
 
@@ -570,6 +574,23 @@ class PostgreSQLConnector:
 
         self._validate_field_types(model, prepared)
         return prepared
+
+    @staticmethod
+    def _reject_unknown_fields(model: Type[PostgreSQLModel], data: Dict[str, Any]) -> None:
+        """
+        Raise QueryError for keys that are not fields of `model`, so a typo in
+        a write payload fails loudly instead of silently dropping the value.
+        Same message as the filter and update paths.
+        """
+        for key in data:
+            if key in model._fields:
+                continue
+            if key in model._relations:
+                raise QueryError(
+                    f"'{key}' is a relation on model '{model.__table__}'; "
+                    f"relations are not writable via create(). Create the related rows separately."
+                )
+            raise QueryError(f"Field '{key}' does not exist on model '{model.__table__}'")
 
     def _validate_field_types(self, model: Type[PostgreSQLModel], data: Dict[str, Any]) -> None:
         for name, value in data.items():
