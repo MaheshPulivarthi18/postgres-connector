@@ -31,14 +31,34 @@ def test_fields_object_accepts_misleading_shapes():
     assert _dict_to_filter({}).fields is None
 
 
-def test_fields_object_with_no_true_key_is_refused():
-    with pytest.raises(QueryError, match="'fields' object selects no field"):
-        _dict_to_filter({"fields": {"name": False, "age": False}})
+def test_fields_object_with_only_false_keys_excludes_them():
+    # LoopBack's fieldsToArray: all-false means "every field except these".
+    opts = _dict_to_filter({"fields": {"age": False}})
+    sql, params = _qb().build_select(opts)
+    assert '"p_users"."id"' in sql and '"p_users"."name"' in sql
+    assert '"p_users"."age"' not in sql
+
+
+def test_fields_object_excluding_an_unknown_field_is_refused():
+    opts = _dict_to_filter({"fields": {"agee": False}})
+    with pytest.raises(QueryError):
+        _qb().build_select(opts)
+
+
+def test_fields_object_excluding_every_field_is_refused():
+    opts = _dict_to_filter({"fields": {"id": False, "name": False, "age": False}})
+    with pytest.raises(QueryError, match="excludes every field"):
+        _qb().build_select(opts)
+
+
+def test_fields_string_and_empty_object():
+    assert _dict_to_filter({"fields": "name"}).fields == ["name"]
+    assert _dict_to_filter({"fields": {}}).fields is None
 
 
 def test_fields_of_an_unsupported_shape_is_refused():
     with pytest.raises(QueryError, match="'fields' must be a list"):
-        _dict_to_filter({"fields": "name"})
+        _dict_to_filter({"fields": 5})
 
 
 def test_order_string_counts_as_one_entry():

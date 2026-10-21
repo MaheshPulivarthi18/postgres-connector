@@ -20,7 +20,7 @@ Supports:
 
 from __future__ import annotations
 
-from typing import Any, Optional, Dict, List, Tuple
+from typing import Any, Optional, Dict, List, Tuple, Union
 
 from .types import FieldDefinition, FilterOptions
 from .exceptions import QueryError
@@ -338,14 +338,21 @@ class QueryBuilder:
 
     # ── Clause builders ───────────────────────────────────────────────────
 
-    def _select_columns(self, fields: Optional[List[str]]) -> str:
+    def _select_columns(self, fields: Union[List[str], Dict[str, bool], None]) -> str:
+        if isinstance(fields, dict):
+            # LoopBack's {name: false} form: every column except these.
+            for f in fields:
+                self._validate_field(f)
+            fields = [f for f in self.fields if f not in fields]
+            if not fields:
+                raise QueryError("'fields' excludes every field of the model.")
         if fields:
             for f in fields:
                 self._validate_field(f)
             return ", ".join(f'"{self.table}"."{f}"' for f in fields)
         return f'"{self.table}".*'
 
-    def _select_clause(self, fields: Optional[List[str]]) -> str:
+    def _select_clause(self, fields: Union[List[str], Dict[str, bool], None]) -> str:
         return f'SELECT {self._select_columns(fields)} FROM "{self.table}"'
 
     def _where_clause(self, where: Optional[Dict[str, Any]]) -> str:
