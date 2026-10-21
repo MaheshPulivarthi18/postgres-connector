@@ -12,12 +12,12 @@ Features:
 
 from __future__ import annotations
 
-import asyncio
+import functools
 import inspect
 import json
 import sys
 from typing import (
-    Any, ClassVar, Optional, Type, Union, Dict, List,
+    Any, Callable, ClassVar, Optional, Type, Union, Dict, List,
     get_args, get_origin,
 )
 
@@ -34,6 +34,13 @@ if sys.version_info >= (3, 10):
 # Sentinel object — stored on the instance for unloaded relations.
 # Distinct from None so we can detect "never loaded" vs "loaded as None".
 _UNLOADED = object()
+
+# Lifecycle events a model can hook into, as methods or via Model.observe().
+HOOK_EVENTS = (
+    "before_create", "after_create",
+    "before_update", "after_update",
+    "before_delete", "after_delete",
+)
 
 
 def _own_annotations(klass: type) -> Dict[str, Any]:
@@ -403,19 +410,51 @@ class PostgreSQLModel(metaclass=ModelMeta):
 
     # ── Hooks ─────────────────────────────────────────────────────────────
 
-    async def _trigger_hook(self, name: str, *args: Any) -> None:
-        """Helper to invoke an async hook if defined on the instance."""
-        hook = getattr(self, name, None)
-        if hook and callable(hook):
-            if asyncio.iscoroutinefunction(hook):
-                await hook(*args)
-            else:
-                hook(*args)
+    @classmethod
+    def observe(cls, event: str, fn: Optional[Callable[..., Any]] = None) -> Any:
+        """
+        Register `fn` to run on `event` for this model (and its subclasses),
+        LoopBack-style. Any number of observers per event; they run in
+        registration order, after the model's own hook method of the same
+        name. `fn(instance, *args)` may be sync or async; raising from a
+        `before_*` observer aborts the write. Usable as a decorator:
+
+            @Order.observe("before_create")
+            async def stamp_reference(order):
+                order.reference = new_reference()
+        """
+        if event not in HOOK_EVENTS:
+            raise ConfigurationError(f"Unknown hook event '{event}'. Use one of: {list(HOOK_EVENTS)}")
+        if fn is None:
+            return lambda f: cls.observe(event, f)
+        observers = cls.__dict__.get("_observers")
+        if observers is None:
+            observers = {}
+            cls._observers = observers
+        observers.setdefault(event, []).append(fn)
+        return fn
 
     @classmethod
-    def _overrides_hook(cls, name: str) -> bool:
-        """True if this model overrides the no-op base implementation of hook `name`."""
-        return getattr(cls, name) is not getattr(PostgreSQLModel, name)
+    def _observers_for(cls, event: str) -> List[Callable[..., Any]]:
+        """Observers for `event` registered on this class and its model bases, base first."""
+        found: List[Callable[..., Any]] = []
+        for klass in reversed(cls.__mro__):
+            found.extend(klass.__dict__.get("_observers", {}).get(event, []))
+        return found
+
+    @classmethod
+    def _has_hook(cls, event: str) -> bool:
+        """True if `event` does anything: an overridden hook method or an observer."""
+        return getattr(cls, event) is not getattr(PostgreSQLModel, event) or bool(cls._observers_for(event))
+
+    async def _trigger_hook(self, event: str, *args: Any) -> None:
+        """Run the hook method for `event`, then its observers in order."""
+        for fn in [getattr(self, event)] + [
+            functools.partial(obs, self) for obs in type(self)._observers_for(event)
+        ]:
+            result = fn(*args)
+            if inspect.isawaitable(result):
+                await result
 
     async def before_create(self) -> None:
         """Override in subclass: called before the INSERT query."""
@@ -442,6 +481,10 @@ class PostgreSQLModel(metaclass=ModelMeta):
         Override in subclass: called by delete_by_id() before the DELETE, on
         the row about to be deleted. Bulk delete_all() does not fire hooks.
         """
+        pass
+
+    async def after_delete(self) -> None:
+        """Override in subclass: called by delete_by_id() after the row was deleted."""
         pass
 
     # ── Serialization ─────────────────────────────────────────────────────
