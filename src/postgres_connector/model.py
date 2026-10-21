@@ -13,6 +13,7 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from typing import (
     Any, ClassVar, Optional, Type, Union, Dict, List,
@@ -26,6 +27,17 @@ from .exceptions import RelationNotLoadedError, ConfigurationError
 # Sentinel object — stored on the instance for unloaded relations.
 # Distinct from None so we can detect "never loaded" vs "loaded as None".
 _UNLOADED = object()
+
+
+def _own_annotations(klass: type) -> Dict[str, Any]:
+    """
+    The annotations declared on `klass` itself, never a base class's. (On
+    Python < 3.10, `klass.__annotations__` falls back to a base's dict when
+    `klass` declares none of its own.)
+    """
+    if hasattr(inspect, "get_annotations"):  # 3.10+
+        return inspect.get_annotations(klass)
+    return klass.__dict__.get("__annotations__", {})
 
 
 class ModelMeta(type):
@@ -61,9 +73,16 @@ class ModelMeta(type):
         cls._field_defaults: Dict[str, Any]                = dict(inherited_defaults)
 
         # ── Collect all annotations up the MRO ───────────────────────────
+        # Also remember which class each one came from: a parent model's
+        # Field()/Relation() was already parsed (and removed from that
+        # class) when the parent was created, so re-reading the bare
+        # annotation here would clobber the inherited definition.
         annotations: Dict[str, Any] = {}
+        annotation_owner: Dict[str, type] = {}
         for klass in reversed(cls.__mro__):
-            annotations.update(getattr(klass, "__annotations__", {}))
+            for attr_name, attr_annotation in _own_annotations(klass).items():
+                annotations[attr_name] = attr_annotation
+                annotation_owner[attr_name] = klass
 
         # ── Process each annotation ───────────────────────────────────────
         for attr_name, attr_annotation in annotations.items():
@@ -71,6 +90,13 @@ class ModelMeta(type):
                 continue
 
             raw_value = namespace.get(attr_name, _UNSET)
+
+            if (
+                raw_value is _UNSET
+                and annotation_owner[attr_name] is not cls
+                and (attr_name in inherited_fields or attr_name in inherited_relations)
+            ):
+                continue  # keep the definition inherited from the parent model
 
             if isinstance(raw_value, Field):
                 # Explicit Field() descriptor
