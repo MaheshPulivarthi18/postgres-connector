@@ -73,8 +73,15 @@ class Migrator:
             return
 
         up_queries, _ = await self._get_queries(db_name)
-        for q in up_queries:
-            await self._pool.execute(q, [])
+        if not up_queries:
+            return
+        # One transaction for the whole sync (PostgreSQL DDL is
+        # transactional): a failing statement rolls back the ones before
+        # it instead of leaving the schema half-migrated.
+        async with self._pool.transaction() as conn:
+            for q in up_queries:
+                self._pool.log_query(q)
+                await conn.execute(q)
 
     async def generate_migrations(self, directory: str) -> Optional[str]:
         db_name = self._pool._config.get("database")
