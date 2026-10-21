@@ -535,11 +535,17 @@ class PostgreSQLModel(metaclass=ModelMeta):
             return False
         pk = self.__class__._get_primary_key()
         if pk:
-            return self.__dict__.get(pk) == other.__dict__.get(pk)
+            mine, theirs = self.__dict__.get(pk), other.__dict__.get(pk)
+            if mine is None or theirs is None:
+                # Unsaved instances have no identity in the database yet, so
+                # two of them are only equal if they are the same object.
+                return self is other
+            return mine == theirs
         return self.__dict__ == other.__dict__
 
     def __hash__(self) -> int:
         pk = self.__class__._get_primary_key()
-        if pk:
-            return hash((self.__class__.__name__, self.__dict__.get(pk)))
+        pk_val = self.__dict__.get(pk) if pk else None
+        if pk_val is not None:
+            return hash((self.__class__.__name__, pk_val))
         return hash(id(self))
