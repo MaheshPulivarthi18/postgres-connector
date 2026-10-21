@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import sys
 from typing import (
     Any, ClassVar, Optional, Type, Union, Dict, List,
     get_args, get_origin,
@@ -23,6 +24,12 @@ from typing import (
 from .fields import Field, Relation, _UNSET
 from .types import FieldDefinition, RelationDefinition, RelationType
 from .exceptions import RelationNotLoadedError, ConfigurationError
+
+# `X | None` (PEP 604) has origin types.UnionType rather than typing.Union.
+_UNION_ORIGINS: tuple = (Union,)
+if sys.version_info >= (3, 10):
+    import types as _types
+    _UNION_ORIGINS += (_types.UnionType,)
 
 # Sentinel object — stored on the instance for unloaded relations.
 # Distinct from None so we can detect "never loaded" vs "loaded as None".
@@ -100,7 +107,7 @@ class ModelMeta(type):
 
             if isinstance(raw_value, Field):
                 # Explicit Field() descriptor
-                python_type = mcs._unwrap_type(attr_annotation)
+                python_type = mcs._unwrap_type(mcs._resolve_annotation(attr_annotation, cls))
                 field_def   = raw_value.to_definition(attr_name, python_type)
                 cls._fields[attr_name] = field_def
 
@@ -115,6 +122,7 @@ class ModelMeta(type):
 
             elif raw_value is _UNSET:
                 # Plain annotation without a descriptor — auto-detect
+                attr_annotation = mcs._resolve_annotation(attr_annotation, cls)
                 if mcs._looks_like_relation(attr_annotation):
                     pass
                 else:
@@ -166,13 +174,34 @@ class ModelMeta(type):
     # ── Type helpers ──────────────────────────────────────────────────────
 
     @staticmethod
+    def _resolve_annotation(annotation: Any, cls: type) -> Any:
+        """
+        Evaluate a string annotation (from `from __future__ import
+        annotations`, or a quoted type) in the model's module, the same way
+        typing.get_type_hints() does — so "datetime" and "Optional[int]"
+        become real types instead of falling back to `str`. Unresolvable
+        strings (forward refs to models not defined yet, names only visible
+        in a function's locals) are returned unchanged.
+        """
+        if not isinstance(annotation, str):
+            return annotation
+        module = sys.modules.get(cls.__module__)
+        globalns = dict(vars(module)) if module else {}
+        try:
+            # Module globals only: the class body would shadow a type with a
+            # same-named field (`date: date = Field()` -> the Field object).
+            return eval(annotation, globalns)  # noqa: S307 — the model's own source
+        except Exception:
+            return annotation
+
+    @staticmethod
     def _unwrap_type(annotation: Any) -> type:
         """Unwrap Optional[X] / Union[X, None] → X. Falls back to str."""
         import typing
         origin = get_origin(annotation)
         args   = get_args(annotation)
 
-        if origin is typing.Union:
+        if origin in _UNION_ORIGINS:
             non_none = [a for a in args if a is not type(None)]
             if non_none:
                 inner = non_none[0]
@@ -199,13 +228,15 @@ class ModelMeta(type):
     def _is_optional(annotation: Any) -> bool:
         import typing
         return (
-            get_origin(annotation) is typing.Union
+            get_origin(annotation) in _UNION_ORIGINS
             and type(None) in get_args(annotation)
         )
 
     @staticmethod
     def _looks_like_relation(annotation: Any) -> bool:
         """Heuristic: list[...] annotations are typically relations."""
+        if isinstance(annotation, str):  # unresolvable, e.g. list["Order"] on 3.8
+            return annotation.replace(" ", "").startswith(("list[", "List["))
         return get_origin(annotation) is list
 
     @staticmethod
@@ -220,10 +251,11 @@ class ModelMeta(type):
         """
         import typing
         if isinstance(annotation, str):
-            if annotation.startswith("list[") and annotation.endswith("]"):
-                inner = annotation[5:-1]
-                return ModelMeta._name_from(inner)
-            return ModelMeta._name_from(annotation)
+            text = annotation.strip().strip("'\"")
+            for prefix in ("list[", "List[", "typing.List[", "Optional[", "typing.Optional["):
+                if text.startswith(prefix) and text.endswith("]"):
+                    return ModelMeta._extract_model_name(text[len(prefix):-1])
+            return ModelMeta._name_from(text)
 
         origin = get_origin(annotation)
         args   = get_args(annotation)
