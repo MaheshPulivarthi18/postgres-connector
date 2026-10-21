@@ -318,7 +318,7 @@ await connector.find(Post, {"where": {"deleted_at": None}})
 
 ## Full-Feature Verification
 
-[`examples/full_feature_smoketest.py`](examples/full_feature_smoketest.py) seeds a large local dataset (5,000 customers, 20,000 orders, 2,000 jobs) and exercises every feature in this README against it end-to-end — bulk `create_many`, the filter DSL, zero-N+1 relation loading, upsert, transactions/savepoints, delete, typed exception mapping, and query timeouts — printing a pass/fail line per feature:
+[`examples/full_feature_smoketest.py`](examples/full_feature_smoketest.py) seeds a large local dataset (5,000 customers, 20,000 orders) and exercises every feature in this README against it end-to-end — bulk `create_many`, the filter DSL, zero-N+1 relation loading, upsert, transactions/savepoints, delete, typed exception mapping, and query timeouts — printing a pass/fail line per feature:
 
 ```bash
 DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=postgres DB_PASSWORD=secret DB_NAME=smoketest \
