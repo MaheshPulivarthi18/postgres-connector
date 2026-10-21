@@ -180,44 +180,6 @@ async def check_transactions(connector, customer_ids):
     check("begin(): rolls back on exception", refreshed.status == "processing")
 
 
-async def check_row_locking(connector):
-    print("\n== Row locking (SKIP LOCKED) across 2000 jobs, 5 workers ==")
-    t0 = time.monotonic()
-
-    async def claim_one():
-        async def claim(tx):
-            job = await tx.find_one(Job, {
-                "where": {"status": "pending"},
-                "order": ["id ASC"],
-                "lock": "update_skip_locked",
-            })
-            if job is None:
-                return None
-            await tx.update_by_id(Job, job.id, {"status": "done"})
-            return job.id
-
-        return await connector.run_transaction(claim)
-
-    claimed: list = []
-
-    async def worker():
-        while True:
-            job_id = await claim_one()
-            if job_id is None:
-                return
-            claimed.append(job_id)
-
-    await asyncio.gather(*(worker() for _ in range(5)))
-    elapsed = time.monotonic() - t0
-
-    done_count = await connector.count(Job, {"status": "done"})
-    check(
-        "row locking: all jobs claimed exactly once, no duplicates",
-        len(claimed) == N_JOBS and len(set(claimed)) == N_JOBS and done_count == N_JOBS,
-        f"{len(claimed)} claims, {len(set(claimed))} unique, {elapsed:.1f}s with 5 workers",
-    )
-
-
 async def check_delete(connector):
     print("\n== Delete at scale ==")
     # Soft delete is intentionally NOT a connector feature — it's
@@ -280,7 +242,6 @@ async def main():
         await check_zero_n_plus_1(connector)
         await check_upsert(connector, customer_ids)
         await check_transactions(connector, customer_ids)
-        await check_row_locking(connector)
         await check_delete(connector)
         await check_exception_mapping(connector)
         await check_timeouts(connector)

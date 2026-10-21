@@ -43,15 +43,6 @@ _OPERATORS: Dict[str, str] = {
     "contains": "@>",
 }
 
-# FilterOptions.lock value → trailing SQL clause
-_LOCK_MODES: Dict[str, str] = {
-    "update":             "FOR UPDATE",
-    "update_nowait":      "FOR UPDATE NOWAIT",
-    "update_skip_locked": "FOR UPDATE SKIP LOCKED",
-    "share":              "FOR SHARE",
-}
-
-
 class QueryBuilder:
     """
     Builds parameterized PostgreSQL SQL for a single table.
@@ -95,7 +86,8 @@ class QueryBuilder:
 
     # ── Public builders ───────────────────────────────────────────────────
 
-    def build_select(self, opts: FilterOptions) -> Tuple[str, List[Any]]:
+    def build_select(self, opts: FilterOptions, for_update: bool = False) -> Tuple[str, List[Any]]:
+        """`for_update` is internal (hook row loads inside a transaction)."""
         self._params = []
         self._param_idx = 0
         parts = [
@@ -104,7 +96,7 @@ class QueryBuilder:
             self._order_clause(opts.order),
             self._limit_clause(opts.limit),
             self._offset_clause(opts.skip),
-            self._lock_clause(opts.lock),
+            "FOR UPDATE" if for_update else "",
         ]
         return self._join(parts), list(self._params)
 
@@ -475,13 +467,6 @@ class QueryBuilder:
         if skip < 0:
             raise QueryError("OFFSET (skip) must be a non-negative integer.")
         return f"OFFSET {int(skip)}"
-
-    def _lock_clause(self, lock: Optional[str]) -> str:
-        if lock is None:
-            return ""
-        if lock not in _LOCK_MODES:
-            raise QueryError(f"Unknown lock mode '{lock}'. Use one of: {sorted(_LOCK_MODES)}")
-        return _LOCK_MODES[lock]
 
     # ── Utilities ─────────────────────────────────────────────────────────
 

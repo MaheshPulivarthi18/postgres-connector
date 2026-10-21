@@ -18,7 +18,6 @@ Built on [`asyncpg`](https://github.com/MagicStack/asyncpg) — the fastest Post
 - **Fault tolerant** — reads auto-retry through transient connection failures (DB restart, network blip); writes never blind-retry
 - **Timeouts** — configurable default per-query timeout, plus a per-call override on `raw()`/`raw_execute()`; a timeout is never mistaken for a retryable connection failure
 - **Typed error mapping** — unique/FK/not-null/check violations become `UniqueConstraintError`/etc., not raw `asyncpg` exceptions
-- **Row locking** — `FOR UPDATE`/`FOR SHARE`/`SKIP LOCKED` in the filter DSL
 - **Upsert** — `INSERT ... ON CONFLICT DO UPDATE`/`DO NOTHING` in one round trip
 - **JSONB support** — `JSONField` for dict/list columns with auto serialization
 - **FastAPI ready** — `__json__()` hook for response serialization
@@ -295,26 +294,6 @@ async def handle_other_integrity_error(request: Request, exc: IntegrityError):
 ```
 Every route in the app gets consistent 409/422 responses for these without a single `try`/`except` in the route itself.
 
-## Row Locking
-
-Pass `lock` in a filter to add `FOR UPDATE` / `FOR SHARE` to the query — the standard building block for job-queue / "claim the next row" patterns. It only makes sense inside a transaction (a lock taken outside one is released the instant the query finishes), so `find`/`find_one` raise `QueryError` if `lock` is used without `session=` — i.e. outside `begin()`/`run_transaction()`.
-
-Modes: `"update"` (`FOR UPDATE`, blocks until the row is free), `"update_nowait"` (`FOR UPDATE NOWAIT`, raises immediately instead of waiting), `"update_skip_locked"` (`FOR UPDATE SKIP LOCKED`, skips rows another transaction already has locked), `"share"` (`FOR SHARE`).
-
-```python
-async def claim_next_job(tx):
-    job = await tx.find_one(Job, {
-        "where": {"status": "pending"},
-        "order": ["created_at ASC"],
-        "lock": "update_skip_locked",   # skip rows another worker already has locked
-    })
-    if job:
-        await tx.update_by_id(Job, job.id, {"status": "in_progress"})
-    return job
-
-job = await connector.run_transaction(claim_next_job)
-```
-
 ## Raw SQL
 
 ```python
@@ -356,7 +335,7 @@ await connector.find(Post, {"where": {"deleted_at": None}})
 
 ## Full-Feature Verification
 
-[`examples/full_feature_smoketest.py`](examples/full_feature_smoketest.py) seeds a large local dataset (5,000 customers, 20,000 orders, 2,000 jobs) and exercises every feature in this README against it end-to-end — bulk `create_many`, the filter DSL, zero-N+1 relation loading, upsert, transactions/savepoints, `SKIP LOCKED` row locking across concurrent workers, delete, typed exception mapping, and query timeouts — printing a pass/fail line per feature:
+[`examples/full_feature_smoketest.py`](examples/full_feature_smoketest.py) seeds a large local dataset (5,000 customers, 20,000 orders, 2,000 jobs) and exercises every feature in this README against it end-to-end — bulk `create_many`, the filter DSL, zero-N+1 relation loading, upsert, transactions/savepoints, delete, typed exception mapping, and query timeouts — printing a pass/fail line per feature:
 
 ```bash
 DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=postgres DB_PASSWORD=secret DB_NAME=smoketest \

@@ -73,7 +73,6 @@ class FilterOptions:
     skip:    Optional[int]                                   = None
     fields:  Optional[List[str]]                             = None
     include: Optional[List[Union[str, dict, IncludeScope]]]  = None
-    lock:    Optional[str]                                   = None
 
 
 @dataclass

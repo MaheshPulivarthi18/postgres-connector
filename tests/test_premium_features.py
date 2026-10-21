@@ -83,33 +83,14 @@ def test_build_update_returning_all_appends_returning_star():
     assert "RETURNING" not in sql2
 
 
-def test_build_select_lock_clause_modes():
-    from postgres_connector.types import FilterOptions
+def test_unknown_filter_keys_are_rejected():
+    from postgres_connector.relation_resolver import _dict_to_filter
 
-    fields = {"status": Field().to_definition("status", str)}
-    expected = {
-        "update":             "FOR UPDATE",
-        "update_nowait":      "FOR UPDATE NOWAIT",
-        "update_skip_locked": "FOR UPDATE SKIP LOCKED",
-        "share":              "FOR SHARE",
-    }
-    for lock_mode, clause in expected.items():
-        qb = QueryBuilder("jobs", fields)
-        sql, _ = qb.build_select(FilterOptions(lock=lock_mode))
-        assert sql.rstrip().endswith(clause), f"{lock_mode} -> {sql!r}"
-
-    qb_none = QueryBuilder("jobs", fields)
-    sql_none, _ = qb_none.build_select(FilterOptions())
-    assert "FOR " not in sql_none
-
-
-def test_build_select_unknown_lock_mode_raises():
-    from postgres_connector.types import FilterOptions
-
-    fields = {"status": Field().to_definition("status", str)}
-    qb = QueryBuilder("jobs", fields)
-    with pytest.raises(QueryError):
-        qb.build_select(FilterOptions(lock="bogus"))
+    with pytest.raises(QueryError, match=r"Unknown filter key\(s\) \['wher'\]"):
+        _dict_to_filter({"wher": {"id": 1}})
+    with pytest.raises(QueryError, match="Unknown filter key"):
+        _dict_to_filter({"where": {"id": 1}, "lmit": 5})
+    assert _dict_to_filter({"where": {"id": 1}, "limit": 5}).limit == 5
 
 
 def _upsert_fields():
