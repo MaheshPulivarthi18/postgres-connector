@@ -489,6 +489,32 @@ class PostgreSQLModel(metaclass=ModelMeta):
 
     # ── Serialization ─────────────────────────────────────────────────────
 
+    @classmethod
+    def pydantic_model(
+        cls,
+        include: Optional[List[str]] = None,
+        exclude: Optional[List[str]] = None,
+        name: Optional[str] = None,
+    ) -> Any:
+        """
+        A Pydantic model of this model's fields, for FastAPI `response_model`s
+        and OpenAPI schemas. `include` adds relations (dotted paths nest:
+        "orders.items"), `exclude` drops fields. Cached per arguments. The
+        generated model reads instances directly, so a route can return one:
+
+            UserOut = User.pydantic_model(include=["orders"], exclude=["password_hash"])
+
+            @app.get("/users/{id}", response_model=UserOut)
+            async def get_user(id: int):
+                return await db.find_by_id(User, id, {"include": ["orders"]})
+
+        Requires pydantic (installed with FastAPI).
+        """
+        from .schemas import pydantic_model
+
+        return pydantic_model(cls, include or (), exclude or (), name)
+
+
     def to_dict(self) -> Dict[str, Any]:
         """
         Serialize to a plain dict.
