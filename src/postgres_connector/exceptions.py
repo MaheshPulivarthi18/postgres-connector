@@ -84,6 +84,23 @@ class QueryTimeoutError(ConnectorError):
         self.timeout = timeout
 
 
+class InvalidValueError(ConnectorError):
+    """
+    A value the database or the driver can't accept for its column: text
+    where a number is expected, a number out of range, a malformed date
+    (SQLSTATE class 22, or asyncpg rejecting a Python value while encoding
+    a query argument). Almost always bad client input. Chains the original
+    asyncpg exception via `__cause__`.
+    """
+    def __init__(self, message: str, *, detail: Optional[str] = None):
+        super().__init__(message)
+        self.detail = detail
+
+
+class ReadOnlyTransactionError(ConnectorError):
+    """A write was attempted inside a read-only transaction (`begin(readonly=True)`)."""
+
+
 class IntegrityError(ConnectorError):
     """
     Base class for a write rejected by a database constraint. Raised

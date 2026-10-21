@@ -56,6 +56,8 @@ from .exceptions import (
     ForeignKeyConstraintError,
     NotNullConstraintError,
     CheckConstraintError,
+    InvalidValueError,
+    ReadOnlyTransactionError,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,6 +105,15 @@ def _translate_integrity_error(exc: "asyncpg.exceptions.IntegrityConstraintViola
     )
 
 
+# Bad values: the server's SQLSTATE class 22 errors, and asyncpg's client-side
+# DataError for a Python value it can't encode as the parameter's type
+# (e.g. 'abc' for an integer). The two are unrelated classes in asyncpg.
+_DATA_ERRORS: Tuple[type, ...] = (
+    asyncpg.exceptions.DataError,
+    asyncpg.exceptions._base.DataError,
+) if asyncpg else ()
+
+
 @asynccontextmanager
 async def _translate_db_errors(timeout: Optional[float] = None):
     """
@@ -131,6 +142,10 @@ async def _translate_db_errors(timeout: Optional[float] = None):
         raise QueryTimeoutError(f"Query exceeded its timeout ({timeout}s)", timeout=timeout) from exc
     except asyncpg.exceptions.IntegrityConstraintViolationError as exc:  # type: ignore[union-attr]
         raise _translate_integrity_error(exc) from exc
+    except _DATA_ERRORS as exc:
+        raise InvalidValueError(str(exc), detail=getattr(exc, "detail", None)) from exc
+    except asyncpg.exceptions.ReadOnlySQLTransactionError as exc:  # type: ignore[union-attr]
+        raise ReadOnlyTransactionError(str(exc)) from exc
 
 
 def _value_matches_type(value: Any, python_type: type) -> bool:
