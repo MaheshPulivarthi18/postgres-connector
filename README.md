@@ -349,6 +349,10 @@ await connector.update_by_id(Post, 1, {"deleted_at": datetime.utcnow()})
 await connector.find(Post, {"where": {"deleted_at": None}})
 ```
 
+## Performance
+
+Against the SQLAlchemy 2.x async ORM on the same database and data, this library is roughly 1.1–2.6× faster per call. The largest gain is on nested includes (2.5×), the smallest on database-bound queries (1.1×). SQLAlchemy Core is faster for bulk inserts. Methodology, full results and the scripts to re-run them are in [`benchmarks/`](benchmarks/README.md).
+
 ## Full-Feature Verification
 
 [`examples/full_feature_smoketest.py`](examples/full_feature_smoketest.py) seeds a large local dataset (5,000 customers, 20,000 orders) and exercises every feature in this README against it end-to-end — bulk `create_many`, the filter DSL, zero-N+1 relation loading, upsert, transactions/savepoints, delete, typed exception mapping, and query timeouts — printing a pass/fail line per feature:
