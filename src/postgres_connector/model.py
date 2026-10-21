@@ -535,11 +535,21 @@ class PostgreSQLModel(metaclass=ModelMeta):
             return False
         pk = self.__class__._get_primary_key()
         if pk:
-            return self.__dict__.get(pk) == other.__dict__.get(pk)
+            self_pk = self.__dict__.get(pk)
+            other_pk = other.__dict__.get(pk)
+            # Unsaved instances (no primary key value yet) compare by
+            # identity, like Django and SQLAlchemy unsaved objects, so two
+            # different new objects never collapse into one another.
+            if self_pk is None or other_pk is None:
+                return self is other
+            return self_pk == other_pk
         return self.__dict__ == other.__dict__
 
     def __hash__(self) -> int:
         pk = self.__class__._get_primary_key()
         if pk:
-            return hash((self.__class__.__name__, self.__dict__.get(pk)))
+            pk_val = self.__dict__.get(pk)
+            if pk_val is None:
+                return hash(id(self))
+            return hash((self.__class__.__name__, pk_val))
         return hash(id(self))
