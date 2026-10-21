@@ -157,18 +157,16 @@ async def check_upsert(connector, customer_ids):
 
 
 async def check_transactions(connector, customer_ids):
-    print("\n== Transactions (begin / run_transaction / savepoints) ==")
+    print("\n== Transactions (begin / savepoints) ==")
 
     cid = customer_ids[0]
 
-    async def bulk_status_update(tx):
+    async with connector.begin() as tx:
         order = await tx.find_one(Order, {"where": {"customer_id": cid}})
         await tx.update_by_id(Order, order.id, {"status": "processing"})
-        return order.id
-
-    order_id = await connector.run_transaction(bulk_status_update)
+    order_id = order.id
     refreshed = await connector.find_by_id(Order, order_id)
-    check("run_transaction: commits on success", refreshed.status == "processing")
+    check("begin(): commits on success", refreshed.status == "processing")
 
     try:
         async with connector.begin() as tx:

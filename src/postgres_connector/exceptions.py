@@ -69,11 +69,6 @@ class ConfigurationError(ConnectorError):
     pass
 
 
-class TransactionError(ConnectorError):
-    """Raised when a transaction fails."""
-    pass
-
-
 class QueryTimeoutError(ConnectorError):
     """
     Raised when a query exceeds its timeout (either the connector-wide
