@@ -332,6 +332,26 @@ async def handle_other_integrity_error(request: Request, exc: IntegrityError):
 ```
 Every route in the app gets consistent 409/422 responses for these without a single `try`/`except` in the route itself.
 
+## Pydantic models for FastAPI
+
+`Model.pydantic_model()` generates a Pydantic model from the fields and relations the model already declares, for `response_model`s and OpenAPI schemas. No hand-written duplicate class to keep in sync.
+
+```python
+UserOut        = User.pydantic_model()                              # all fields
+UserWithOrders = User.pydantic_model(include=["orders.items"])      # relations, nested
+UserPublic     = User.pydantic_model(exclude=["password_hash"])
+
+@app.get("/users/{id}", response_model=UserWithOrders)
+async def get_user(id: int):
+    return await db.find_by_id(User, id, {"include": ["orders.items"]})
+```
+
+- Field types, nullability and `max_length` come from `Field(...)`. `auto_now` / `auto_now_add` fields are `datetime`, JSON fields accept any JSON.
+- Included relations are nested generated models: a list for `hasMany` / `hasManyThrough`, an optional object for `belongsTo` / `hasOne`.
+- The generated model reads ORM instances directly (`from_attributes`), so routes return the instance as-is.
+- Results are cached per arguments. Pass `name=` to choose the schema name shown in OpenAPI.
+- Needs Pydantic v2, which FastAPI installs.
+
 ## Raw SQL
 
 ```python
