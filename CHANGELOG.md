@@ -1,8 +1,14 @@
 # Changelog
 
-## [Unreleased]
+## [3.0.0] - 2026-10-22
 
-FastAPI integration, LoopBack filter compatibility, and fixes from the 2.0.0 review.
+FastAPI integration, LoopBack filter compatibility, and fixes from the 2.0.0 review. Major version because of the timestamp change below; see [Upgrading to 3.0](README.md#upgrading-to-30).
+
+### Breaking
+- `auto_now` / `auto_now_add` columns are `TIMESTAMPTZ` and stamped with an aware UTC `datetime` (`datetime.now(timezone.utc)`). They used to be `TIMESTAMP` stamped with naive `datetime.utcnow()`, while rows written outside the ORM got the server's local time, so one column could mix two time zones (#36, #55).
+  - They now come back as **timezone-aware** datetimes. Comparing them with a naive datetime raises `TypeError`; use `datetime.now(timezone.utc)`.
+  - The first `migrate()` after upgrading converts each existing column once (`USING col AT TIME ZONE 'UTC'`, keeping the stored instants). This rewrites the table and locks it while it runs.
+  - No more `utcnow()` `DeprecationWarning`s on Python 3.12+.
 
 ### Added
 - `Model.observe(event, fn)` for any number of hooks per event, and an `after_delete` hook (#28).
