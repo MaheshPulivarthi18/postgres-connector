@@ -177,11 +177,17 @@ class Order(TimestampMixin, PostgreSQLModel):
     id: int = Field(primary_key=True)
 ```
 
-A mixin's `Field(...)` options, `Relation(...)`s and hook methods apply to every model that inherits it.
+A mixin's `Field(...)` options, `Relation(...)`s and hook methods apply to every model that inherits it. Hook methods from mixins add up: if two mixins both define `before_create`, both run.
 
 ## Hooks
 
-Write a hook as a method on the model (or on a mixin), or register any number with `observe()`. The method runs first, then observers in registration order. Observers on a model also apply to its subclasses.
+Write a hook as a method on the model (or on a mixin), or register any number with `observe()`. For each event, hooks run in this order:
+
+1. hook methods from mixins, base classes first (for `class Doc(A, B, PostgreSQLModel)`, `B`'s then `A`'s)
+2. the model's own hook method (a subclass model's method replaces its parent model's, as usual)
+3. observers, in registration order (observers on a model also apply to its subclasses)
+
+Mixin hooks run on their own, so a model's hook should not call `super()` to reach them; that would run the mixin's hook twice.
 
 ```python
 class Order(PostgreSQLModel):

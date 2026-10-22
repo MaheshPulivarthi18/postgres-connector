@@ -457,9 +457,28 @@ class PostgreSQLModel(metaclass=ModelMeta):
         """True if `event` does anything: an overridden hook method or an observer."""
         return getattr(cls, event) is not getattr(PostgreSQLModel, event) or bool(cls._observers_for(event))
 
+    @classmethod
+    def _hook_methods(cls, event: str) -> List[Callable[..., Any]]:
+        """
+        Hook methods for `event`, bases first: the method from every plain
+        mixin class that defines one, then the model's own (most-derived)
+        method. Mixin hooks are additive, so two mixins defining the same
+        hook both run; between model classes, a subclass's method overrides
+        its parent's as usual.
+        """
+        methods: List[Callable[..., Any]] = []
+        for klass in reversed(cls.__mro__):
+            fn = klass.__dict__.get(event)
+            if fn is not None and not isinstance(klass, ModelMeta):
+                methods.append(fn)
+        own = getattr(cls, event)
+        if own not in methods:
+            methods.append(own)
+        return methods
+
     async def _trigger_hook(self, event: str, *args: Any) -> None:
-        """Run the hook method for `event`, then its observers in order."""
-        for fn in [getattr(self, event)] + [
+        """Run the hook methods for `event` (mixins first), then its observers in order."""
+        for fn in [m.__get__(self, type(self)) for m in type(self)._hook_methods(event)] + [
             functools.partial(obs, self) for obs in type(self)._observers_for(event)
         ]:
             result = fn(*args)
