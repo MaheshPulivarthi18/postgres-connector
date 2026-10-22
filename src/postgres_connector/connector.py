@@ -108,9 +108,11 @@ def _translate_integrity_error(exc: "asyncpg.exceptions.IntegrityConstraintViola
 # Bad values: the server's SQLSTATE class 22 errors, and asyncpg's client-side
 # DataError for a Python value it can't encode as the parameter's type
 # (e.g. 'abc' for an integer). The two are unrelated classes in asyncpg.
-_DATA_ERRORS: Tuple[type, ...] = (
-    asyncpg.exceptions.DataError,
-    asyncpg.exceptions._base.DataError,
+_DATA_ERRORS: Tuple[type, ...] = tuple(
+    cls for cls in (
+        asyncpg.exceptions.DataError,
+        getattr(getattr(asyncpg.exceptions, "_base", None), "DataError", None),  # private path; guard a rename
+    ) if cls is not None
 ) if asyncpg else ()
 
 

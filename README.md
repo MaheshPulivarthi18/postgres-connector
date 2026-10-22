@@ -335,7 +335,7 @@ register_exception_handlers(app)
 | `NotNullConstraintError`, `CheckConstraintError` | 422 |
 | `QueryTimeoutError` | 504 |
 
-The body is `{"error": "<class name>", "detail": "<message>"}`, plus `constraint`, `table`, `column` and `db_detail` when Postgres reported them. To shape responses differently, register your own handlers with `@app.exception_handler(...)` instead, or after this call to override one class.
+The body is `{"error": "<class name>", "detail": "<message>"}`, plus `constraint`, `table` and `column` when Postgres reported them. Postgres's DETAIL text, which quotes stored values (`Key (email)=(raj@x.io) already exists`), is left out of `detail` and only sent as `db_detail` with `register_exception_handlers(app, expose_db_detail=True)`; keep it off for public APIs. To shape responses differently, register your own handlers with `@app.exception_handler(...)` instead, or after this call to override one class.
 
 ## Pydantic models for FastAPI
 
