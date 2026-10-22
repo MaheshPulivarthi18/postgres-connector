@@ -382,7 +382,7 @@ async def list_users(filter: FilterOptions = Depends(FilterParam(User, max_limit
 
 `GET /users?filter={"where":{"active":true},"order":["name ASC"],"limit":20,"include":["orders"]}`
 
-Without a `limit`, `max_limit` is used; a larger `limit` is rejected. Pass `max_limit=None` for no cap.
+Without a `limit`, `max_limit` is used; a larger `limit` is rejected. The same cap applies to every include scope, per parent, so `include` can't pull in unbounded child rows. Includes may nest at most `max_include_depth` levels (default 3). Pass `None` to disable either cap.
 
 ## Raw SQL
 
