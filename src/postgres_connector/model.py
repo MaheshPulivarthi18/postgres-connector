@@ -7,17 +7,18 @@ Features:
   - Typed instance creation from raw DB rows
   - Relation access protection (RelationNotLoadedError if not included)
   - .to_dict() / .to_json() serialization with nested relations
-  - Pydantic-compatible __json__ hook for FastAPI responses
+  - dict(instance) == instance.to_dict(), so FastAPI can return models directly
 """
 
 from __future__ import annotations
 
+import copy
 import functools
 import inspect
 import json
 import sys
 from typing import (
-    Any, Callable, ClassVar, Optional, Type, Union, Dict, List,
+    Any, Callable, ClassVar, Iterator, Optional, Type, Tuple, Union, Dict, List,
     get_args, get_origin,
 )
 
@@ -317,7 +318,7 @@ class PostgreSQLModel(metaclass=ModelMeta):
             email:  str           = Field(unique=True)
             active: bool          = Field(default=True)
 
-            orders: list["Order"] = Relation(type="hasMany", foreign_key="user_id")
+            orders: List["Order"] = Relation(type="hasMany", foreign_key="user_id")
     """
 
     # ── Class-level metadata (set by ModelMeta) ───────────────────────────
@@ -337,7 +338,7 @@ class PostgreSQLModel(metaclass=ModelMeta):
             if value is not _UNSET:
                 object.__setattr__(self, field_name, value)
             elif field_name in self.__class__._field_defaults:
-                object.__setattr__(self, field_name, self.__class__._field_defaults[field_name])
+                object.__setattr__(self, field_name, self.__class__._default_for(field_name))
             else:
                 object.__setattr__(self, field_name, None)
 
@@ -376,6 +377,15 @@ class PostgreSQLModel(metaclass=ModelMeta):
         return name in self._loaded_relations
 
     # ── Class helpers ─────────────────────────────────────────────────────
+
+    @classmethod
+    def _default_for(cls, field_name: str) -> Any:
+        """
+        The declared default for `field_name`, as a fresh copy: a mutable
+        default such as `JSONField(default={})` is one object on the class,
+        and handing it out directly would share it between every instance.
+        """
+        return copy.deepcopy(cls._field_defaults[field_name])
 
     @classmethod
     def _get_primary_key(cls) -> Optional[str]:
@@ -447,9 +457,28 @@ class PostgreSQLModel(metaclass=ModelMeta):
         """True if `event` does anything: an overridden hook method or an observer."""
         return getattr(cls, event) is not getattr(PostgreSQLModel, event) or bool(cls._observers_for(event))
 
+    @classmethod
+    def _hook_methods(cls, event: str) -> List[Callable[..., Any]]:
+        """
+        Hook methods for `event`, bases first: the method from every plain
+        mixin class that defines one, then the model's own (most-derived)
+        method. Mixin hooks are additive, so two mixins defining the same
+        hook both run; between model classes, a subclass's method overrides
+        its parent's as usual.
+        """
+        methods: List[Callable[..., Any]] = []
+        for klass in reversed(cls.__mro__):
+            fn = klass.__dict__.get(event)
+            if fn is not None and not isinstance(klass, ModelMeta):
+                methods.append(fn)
+        own = getattr(cls, event)
+        if own not in methods:
+            methods.append(own)
+        return methods
+
     async def _trigger_hook(self, event: str, *args: Any) -> None:
-        """Run the hook method for `event`, then its observers in order."""
-        for fn in [getattr(self, event)] + [
+        """Run the hook methods for `event` (mixins first), then its observers in order."""
+        for fn in [m.__get__(self, type(self)) for m in type(self)._hook_methods(event)] + [
             functools.partial(obs, self) for obs in type(self)._observers_for(event)
         ]:
             result = fn(*args)
@@ -489,6 +518,32 @@ class PostgreSQLModel(metaclass=ModelMeta):
 
     # ── Serialization ─────────────────────────────────────────────────────
 
+    @classmethod
+    def pydantic_model(
+        cls,
+        include: Optional[List[str]] = None,
+        exclude: Optional[List[str]] = None,
+        name: Optional[str] = None,
+    ) -> Any:
+        """
+        A Pydantic model of this model's fields, for FastAPI `response_model`s
+        and OpenAPI schemas. `include` adds relations (dotted paths nest:
+        "orders.items"), `exclude` drops fields. Cached per arguments. The
+        generated model reads instances directly, so a route can return one:
+
+            UserOut = User.pydantic_model(include=["orders"], exclude=["password_hash"])
+
+            @app.get("/users/{id}", response_model=UserOut)
+            async def get_user(id: int):
+                return await db.find_by_id(User, id, {"include": ["orders"]})
+
+        Requires pydantic (installed with FastAPI).
+        """
+        from .schemas import pydantic_model
+
+        return pydantic_model(cls, include or (), exclude or (), name)
+
+
     def to_dict(self) -> Dict[str, Any]:
         """
         Serialize to a plain dict.
@@ -519,8 +574,18 @@ class PostgreSQLModel(metaclass=ModelMeta):
         """Serialize to a JSON string."""
         return json.dumps(self.to_dict(), default=str, indent=indent)
 
-    # FastAPI / Pydantic compatibility hook
+    def __iter__(self) -> Iterator[Tuple[str, Any]]:
+        """
+        Yield `(name, value)` pairs of `to_dict()`, so `dict(instance)` is the
+        instance's public data. FastAPI's `jsonable_encoder` serializes
+        objects it doesn't know with `dict(obj)`, which makes a model (or a
+        list of models) returnable from a route as-is: loaded relations under
+        their names, unloaded ones omitted, no internal attributes.
+        """
+        return iter(self.to_dict().items())
+
     def __json__(self) -> Dict[str, Any]:
+        """Same as `to_dict()`; kept for code that calls it directly."""
         return self.to_dict()
 
     # ── Magic methods ─────────────────────────────────────────────────────
@@ -535,11 +600,21 @@ class PostgreSQLModel(metaclass=ModelMeta):
             return False
         pk = self.__class__._get_primary_key()
         if pk:
-            return self.__dict__.get(pk) == other.__dict__.get(pk)
+            self_pk = self.__dict__.get(pk)
+            other_pk = other.__dict__.get(pk)
+            # Unsaved instances (no primary key value yet) compare by
+            # identity, like Django and SQLAlchemy unsaved objects, so two
+            # different new objects never collapse into one another.
+            if self_pk is None or other_pk is None:
+                return self is other
+            return self_pk == other_pk
         return self.__dict__ == other.__dict__
 
     def __hash__(self) -> int:
         pk = self.__class__._get_primary_key()
         if pk:
-            return hash((self.__class__.__name__, self.__dict__.get(pk)))
+            pk_val = self.__dict__.get(pk)
+            if pk_val is None:
+                return hash(id(self))
+            return hash((self.__class__.__name__, pk_val))
         return hash(id(self))
