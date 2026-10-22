@@ -236,7 +236,16 @@ user = await connector.upsert(
 await connector.migrate()
 ```
 
-Migrations are **additive-only** — they create missing tables and add missing columns. They never drop or alter existing columns.
+Migrations create missing tables, columns, indexes and constraints, and change a column's type when the model's type changed. They never drop tables or columns.
+
+### Upgrading to 3.0
+
+3.0 stores `auto_now` / `auto_now_add` columns as `TIMESTAMPTZ` (UTC) instead of `TIMESTAMP`, so rows written by the ORM and by SQL `DEFAULT`s always agree.
+
+- **Run `migrate()` once in a maintenance window.** It converts each existing column, keeping the stored values (`ALTER COLUMN ... TYPE TIMESTAMPTZ USING col AT TIME ZONE 'UTC'`). This rewrites the table and blocks reads and writes on it while it runs: instant for small tables, minutes for very large ones.
+- **Compare with aware datetimes.** These fields now come back with a time zone, so `row.created_at < datetime.utcnow()` raises `TypeError`. Use `datetime.now(timezone.utc)`.
+- Rows written by SQL `DEFAULT` in a non-UTC session before upgrading were stored in local time; they can't be told apart automatically. Fix them by hand if it matters.
+- Also check the 3.0 behaviour changes in the [CHANGELOG](CHANGELOG.md): unknown keys in `create()` now raise, mixin hooks all run, and `Field(foreign_key=...)` now creates a constraint.
 
 ## Transactions
 
