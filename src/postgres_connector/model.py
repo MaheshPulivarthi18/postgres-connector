@@ -12,6 +12,7 @@ Features:
 
 from __future__ import annotations
 
+import copy
 import functools
 import inspect
 import json
@@ -337,7 +338,7 @@ class PostgreSQLModel(metaclass=ModelMeta):
             if value is not _UNSET:
                 object.__setattr__(self, field_name, value)
             elif field_name in self.__class__._field_defaults:
-                object.__setattr__(self, field_name, self.__class__._field_defaults[field_name])
+                object.__setattr__(self, field_name, self.__class__._default_for(field_name))
             else:
                 object.__setattr__(self, field_name, None)
 
@@ -376,6 +377,15 @@ class PostgreSQLModel(metaclass=ModelMeta):
         return name in self._loaded_relations
 
     # ── Class helpers ─────────────────────────────────────────────────────
+
+    @classmethod
+    def _default_for(cls, field_name: str) -> Any:
+        """
+        The declared default for `field_name`, as a fresh copy: a mutable
+        default such as `JSONField(default={})` is one object on the class,
+        and handing it out directly would share it between every instance.
+        """
+        return copy.deepcopy(cls._field_defaults[field_name])
 
     @classmethod
     def _get_primary_key(cls) -> Optional[str]:

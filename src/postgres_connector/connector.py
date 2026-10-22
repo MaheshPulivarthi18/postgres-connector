@@ -431,7 +431,7 @@ class PostgreSQLConnector:
                 if field_def.auto_now_add and name not in row:
                     row[name] = now
                 elif name not in row and name in model._field_defaults:
-                    row[name] = model._field_defaults[name]
+                    row[name] = model._default_for(name)
             # Skip auto-increment PK if not provided
             for name, field_def in model._fields.items():
                 if field_def.auto_increment and name not in row:
