@@ -57,6 +57,8 @@ from .exceptions import (
     ForeignKeyConstraintError,
     NotNullConstraintError,
     CheckConstraintError,
+    InvalidValueError,
+    ReadOnlyTransactionError,
 )
 
 __all__ = [
@@ -90,4 +92,6 @@ __all__ = [
     "ForeignKeyConstraintError",
     "NotNullConstraintError",
     "CheckConstraintError",
+    "InvalidValueError",
+    "ReadOnlyTransactionError",
 ]

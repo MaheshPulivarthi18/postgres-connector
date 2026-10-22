@@ -309,28 +309,33 @@ Every write (`create`, `create_many`, `update_by_id`, `upsert`, `raw_execute`, a
 
 All four inherit from `IntegrityError` (catch that for "some constraint failed, don't care which"), which inherits from `ConnectorError` (the catch-all base for everything this package raises). Each carries `.constraint`, `.table`, `.column`, `.detail` from the underlying Postgres error, and chains the original `asyncpg` exception via `__cause__` if you need it.
 
-This is what makes error handling a one-time FastAPI setup instead of a per-route concern — register exception handlers once, at the app level:
+Two more typed errors cover failures that used to come out as raw driver exceptions:
+
+| Exception | Condition |
+|---|---|
+| `InvalidValueError` | a value the column can't take: text for a number, too long for a `VARCHAR`, out of range (SQLSTATE class 22, or asyncpg rejecting a parameter) |
+| `ReadOnlyTransactionError` | a write inside `begin(readonly=True)` |
+
+### FastAPI
+
+One call maps them all to HTTP responses, so no route needs a `try`/`except`:
 
 ```python
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from postgres_connector import UniqueConstraintError, ForeignKeyConstraintError, IntegrityError
+from fastapi import FastAPI
+from postgres_connector.fastapi import register_exception_handlers
 
 app = FastAPI()
-
-@app.exception_handler(UniqueConstraintError)
-async def handle_conflict(request: Request, exc: UniqueConstraintError):
-    return JSONResponse(status_code=409, content={"error": "already exists", "detail": exc.detail})
-
-@app.exception_handler(ForeignKeyConstraintError)
-async def handle_bad_reference(request: Request, exc: ForeignKeyConstraintError):
-    return JSONResponse(status_code=422, content={"error": "invalid reference", "detail": exc.detail})
-
-@app.exception_handler(IntegrityError)
-async def handle_other_integrity_error(request: Request, exc: IntegrityError):
-    return JSONResponse(status_code=422, content={"error": "constraint violation", "detail": exc.detail})
+register_exception_handlers(app)
 ```
-Every route in the app gets consistent 409/422 responses for these without a single `try`/`except` in the route itself.
+
+| Error | HTTP status |
+|---|---|
+| `QueryError`, `InvalidValueError`, `ConfigurationError` (bad client input) | 400 |
+| `UniqueConstraintError`, `ForeignKeyConstraintError` | 409 |
+| `NotNullConstraintError`, `CheckConstraintError` | 422 |
+| `QueryTimeoutError` | 504 |
+
+The body is `{"error": "<class name>", "detail": "<message>"}`, plus `constraint`, `table` and `column` when Postgres reported them. Postgres's DETAIL text, which quotes stored values (`Key (email)=(raj@x.io) already exists`), is left out of `detail` and only sent as `db_detail` with `register_exception_handlers(app, expose_db_detail=True)`; keep it off for public APIs. To shape responses differently, register your own handlers with `@app.exception_handler(...)` instead, or after this call to override one class.
 
 ## Pydantic models for FastAPI
 
