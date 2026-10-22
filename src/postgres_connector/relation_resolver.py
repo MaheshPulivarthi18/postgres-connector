@@ -204,10 +204,19 @@ def stitch_keys(model_class: Type["PostgreSQLModel"], include: Optional[List[Inc
     return keys
 
 
-def with_keys(fields: Optional[List[str]], keys: List[str]) -> Optional[List[str]]:
-    """`fields` plus any of `keys` it leaves out. No projection (None) selects every column already."""
+def with_keys(
+    fields: Union[List[str], Dict[str, bool], None], keys: List[str]
+) -> Union[List[str], Dict[str, bool], None]:
+    """
+    `fields` plus any of `keys` it leaves out. No projection (None) selects
+    every column already. For the exclusion form ({name: false}) the keys are
+    taken off the exclusion list instead, so it still hides everything else.
+    """
     if not fields:
         return fields
+    if isinstance(fields, dict):
+        kept = {name: v for name, v in fields.items() if name not in keys}
+        return kept or None
     return list(fields) + [k for k in keys if k not in fields]
 
 

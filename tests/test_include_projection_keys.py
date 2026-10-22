@@ -77,3 +77,20 @@ async def test_callers_filter_is_not_mutated(connector, data):
     flt = {"fields": ["name"], "include": [{"relation": "posts", "scope": {"fields": ["title"]}}]}
     await connector.find(PkUser, flt)
     assert flt == {"fields": ["name"], "include": [{"relation": "posts", "scope": {"fields": ["title"]}}]}
+
+
+async def test_exclusion_form_keeps_hiding_other_fields(connector, data):
+    # {name: false} must stay an exclusion: adding stitch keys used to turn it
+    # into a list of the excluded names, selecting exactly the hidden column.
+    users = await connector.find(PkUser, {"fields": {"name": False}, "order": ["id ASC"], "include": ["posts"]})
+    assert [u.name for u in users] == [None, None, None]
+    assert [len(u.posts) for u in users] == [1, 1, 1]
+    users = await connector.find(
+        PkUser, {"order": ["id ASC"], "include": [{"relation": "posts", "scope": {"fields": {"title": False}}}]}
+    )
+    assert [p.title for u in users for p in u.posts] == [None, None, None]
+
+
+async def test_exclusion_of_a_key_column_still_stitches(connector, data):
+    users = await connector.find(PkUser, {"fields": {"id": False}, "include": ["posts"]})
+    assert [len(u.posts) for u in users] == [1, 1, 1]
