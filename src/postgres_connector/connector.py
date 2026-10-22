@@ -43,7 +43,7 @@ except ImportError:
 from .model import PostgreSQLModel
 from .pool import ConnectionPool
 from .query_builder import QueryBuilder
-from .relation_resolver import RelationResolver, _dict_to_filter, _parse_include
+from .relation_resolver import RelationResolver, _dict_to_filter, _parse_include, stitch_keys, with_keys
 from .transaction import TransactionContext
 from .types import FilterOptions, IncludeItem
 from .migrator import Migrator
@@ -299,6 +299,9 @@ class PostgreSQLConnector:
             })
         """
         opts = self._to_filter(filter)
+        if opts.include:
+            # Keep the keys the includes are attached by, even when `fields` omits them.
+            opts.fields = with_keys(opts.fields, stitch_keys(model, opts.include))
 
         qb = QueryBuilder(model.__table__, model._fields)
         sql, params = qb.build_select(opts)

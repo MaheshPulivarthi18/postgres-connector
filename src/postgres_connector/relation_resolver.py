@@ -24,6 +24,7 @@ Supported relation types:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from typing import Any, Optional, Type, Dict, List, TYPE_CHECKING, Union
 
@@ -183,6 +184,42 @@ def _dict_to_filter(d: Dict) -> FilterOptions:
 
 # ── Resolver ──────────────────────────────────────────────────────────────────
 
+def stitch_keys(model_class: Type["PostgreSQLModel"], include: Optional[List[IncludeItem]]) -> List[str]:
+    """
+    Columns of `model_class` that must be selected to attach `include`'s
+    relations: the primary key for hasMany / hasOne / hasManyThrough, the
+    foreign key for belongsTo.
+    """
+    keys: List[str] = []
+    for scope in _merge_includes([_parse_include(item) for item in include or []]):
+        rel_def = model_class._relations.get(scope.relation)
+        if rel_def is None:
+            continue  # resolve() raises RelationNotDefinedError for it
+        if rel_def.relation_type == RelationType.BELONGS_TO:
+            key = rel_def.foreign_key
+        else:
+            key = model_class._get_primary_key()
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def with_keys(
+    fields: Union[List[str], Dict[str, bool], None], keys: List[str]
+) -> Union[List[str], Dict[str, bool], None]:
+    """
+    `fields` plus any of `keys` it leaves out. No projection (None) selects
+    every column already. For the exclusion form ({name: false}) the keys are
+    taken off the exclusion list instead, so it still hides everything else.
+    """
+    if not fields:
+        return fields
+    if isinstance(fields, dict):
+        kept = {name: v for name, v in fields.items() if name not in keys}
+        return kept or None
+    return list(fields) + [k for k in keys if k not in fields]
+
+
 class RelationResolver:
     """
     Resolves nested relation includes for lists of model instances.
@@ -249,6 +286,17 @@ class RelationResolver:
         # Ensure scope exists
         if not scope.scope:
             scope.scope = FilterOptions()
+
+        # A `fields` projection in the scope must still select the columns used
+        # to attach these rows to their parents, and those its own nested
+        # includes need; otherwise every relation comes back silently empty.
+        if scope.scope.fields:
+            if rel_def.relation_type in (RelationType.HAS_MANY, RelationType.HAS_ONE):
+                link = [rel_def.foreign_key]
+            else:
+                link = [target_cls._get_primary_key()]
+            needed = link + stitch_keys(target_cls, scope.scope.include)
+            scope.scope = dataclasses.replace(scope.scope, fields=with_keys(scope.scope.fields, needed))
 
         if rel_def.relation_type == RelationType.HAS_MANY:
             await self._has_many(parents, scope, rel_def, target_cls, session)
