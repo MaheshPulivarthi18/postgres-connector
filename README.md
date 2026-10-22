@@ -20,7 +20,7 @@ Built on [`asyncpg`](https://github.com/MagicStack/asyncpg) — the fastest Post
 - **Typed error mapping** — unique/FK/not-null/check violations become `UniqueConstraintError`/etc., not raw `asyncpg` exceptions
 - **Upsert** — `INSERT ... ON CONFLICT DO UPDATE`/`DO NOTHING` in one round trip
 - **JSONB support** — `JSONField` for dict/list columns with auto serialization
-- **FastAPI ready** — `__json__()` hook for response serialization
+- **FastAPI ready** — return models (or lists of models) from routes as-is; they serialize like `to_dict()`
 
 ## Installation
 
@@ -31,6 +31,8 @@ pip install oceanic-postgres-orm
 ## Quick Start
 
 ```python
+from typing import List
+
 from postgres_connector import PostgreSQLConnector, PostgreSQLModel, Field, Relation
 
 class User(PostgreSQLModel):
@@ -39,7 +41,7 @@ class User(PostgreSQLModel):
     name:   str           = Field(max_length=100)
     email:  str           = Field(unique=True)
     active: bool          = Field(default=True)
-    orders: list["Order"] = Relation(type="hasMany", foreign_key="user_id")
+    orders: List["Order"] = Relation(type="hasMany", foreign_key="user_id")
 
 class Order(PostgreSQLModel):
     __table__ = "orders"
@@ -136,15 +138,17 @@ users = await connector.find(User, {
 ## Relations
 
 ```python
+from typing import List
+
 class User(PostgreSQLModel):
     __table__ = "users"
     id:      int              = Field(primary_key=True)
     # hasMany
-    orders:  list["Order"]   = Relation(type="hasMany",   foreign_key="user_id")
+    orders:  List["Order"]   = Relation(type="hasMany",   foreign_key="user_id")
     # hasOne
     profile: "Profile"       = Relation(type="hasOne",    foreign_key="user_id")
     # hasManyThrough
-    tags:    list["Tag"]     = Relation(
+    tags:    List["Tag"]     = Relation(
         type="hasManyThrough",
         through="UserTag",
         foreign_key="user_id",
@@ -173,11 +177,17 @@ class Order(TimestampMixin, PostgreSQLModel):
     id: int = Field(primary_key=True)
 ```
 
-A mixin's `Field(...)` options, `Relation(...)`s and hook methods apply to every model that inherits it.
+A mixin's `Field(...)` options, `Relation(...)`s and hook methods apply to every model that inherits it. Hook methods from mixins add up: if two mixins both define `before_create`, both run.
 
 ## Hooks
 
-Write a hook as a method on the model (or on a mixin), or register any number with `observe()`. The method runs first, then observers in registration order. Observers on a model also apply to its subclasses.
+Write a hook as a method on the model (or on a mixin), or register any number with `observe()`. For each event, hooks run in this order:
+
+1. hook methods from mixins, base classes first (for `class Doc(A, B, PostgreSQLModel)`, `B`'s then `A`'s)
+2. the model's own hook method (a subclass model's method replaces its parent model's, as usual)
+3. observers, in registration order (observers on a model also apply to its subclasses)
+
+Mixin hooks run on their own, so a model's hook should not call `super()` to reach them; that would run the mixin's hook twice.
 
 ```python
 class Order(PostgreSQLModel):
@@ -191,6 +201,18 @@ async def audit(order):
 ```
 
 Events: `before_create`, `after_create`, `before_update` (also receives the `data` being set, which it may change), `after_update`, `before_delete`, `after_delete`. Raising from a `before_*` hook aborts the write.
+
+## Pagination
+
+`find_and_count()` returns one page and the total number of matches, for list endpoints. It takes the same filter as `find()`; the count uses only `where`.
+
+```python
+users, total = await connector.find_and_count(
+    User, {"where": {"active": True}, "order": ["id ASC"], "limit": 20, "skip": 40}
+)
+```
+
+The two queries run concurrently on two pooled connections. Inside `begin()` (`await tx.find_and_count(...)`) they run one after the other on the transaction's connection.
 
 ## Upsert
 
@@ -287,28 +309,71 @@ Every write (`create`, `create_many`, `update_by_id`, `upsert`, `raw_execute`, a
 
 All four inherit from `IntegrityError` (catch that for "some constraint failed, don't care which"), which inherits from `ConnectorError` (the catch-all base for everything this package raises). Each carries `.constraint`, `.table`, `.column`, `.detail` from the underlying Postgres error, and chains the original `asyncpg` exception via `__cause__` if you need it.
 
-This is what makes error handling a one-time FastAPI setup instead of a per-route concern — register exception handlers once, at the app level:
+Two more typed errors cover failures that used to come out as raw driver exceptions:
+
+| Exception | Condition |
+|---|---|
+| `InvalidValueError` | a value the column can't take: text for a number, too long for a `VARCHAR`, out of range (SQLSTATE class 22, or asyncpg rejecting a parameter) |
+| `ReadOnlyTransactionError` | a write inside `begin(readonly=True)` |
+
+### FastAPI
+
+One call maps them all to HTTP responses, so no route needs a `try`/`except`:
 
 ```python
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from postgres_connector import UniqueConstraintError, ForeignKeyConstraintError, IntegrityError
+from fastapi import FastAPI
+from postgres_connector.fastapi import register_exception_handlers
 
 app = FastAPI()
-
-@app.exception_handler(UniqueConstraintError)
-async def handle_conflict(request: Request, exc: UniqueConstraintError):
-    return JSONResponse(status_code=409, content={"error": "already exists", "detail": exc.detail})
-
-@app.exception_handler(ForeignKeyConstraintError)
-async def handle_bad_reference(request: Request, exc: ForeignKeyConstraintError):
-    return JSONResponse(status_code=422, content={"error": "invalid reference", "detail": exc.detail})
-
-@app.exception_handler(IntegrityError)
-async def handle_other_integrity_error(request: Request, exc: IntegrityError):
-    return JSONResponse(status_code=422, content={"error": "constraint violation", "detail": exc.detail})
+register_exception_handlers(app)
 ```
-Every route in the app gets consistent 409/422 responses for these without a single `try`/`except` in the route itself.
+
+| Error | HTTP status |
+|---|---|
+| `QueryError`, `InvalidValueError`, `ConfigurationError` (bad client input) | 400 |
+| `UniqueConstraintError`, `ForeignKeyConstraintError` | 409 |
+| `NotNullConstraintError`, `CheckConstraintError` | 422 |
+| `QueryTimeoutError` | 504 |
+
+The body is `{"error": "<class name>", "detail": "<message>"}`, plus `constraint`, `table` and `column` when Postgres reported them. Postgres's DETAIL text, which quotes stored values (`Key (email)=(raj@x.io) already exists`), is left out of `detail` and only sent as `db_detail` with `register_exception_handlers(app, expose_db_detail=True)`; keep it off for public APIs. To shape responses differently, register your own handlers with `@app.exception_handler(...)` instead, or after this call to override one class.
+
+## Pydantic models for FastAPI
+
+`Model.pydantic_model()` generates a Pydantic model from the fields and relations the model already declares, for `response_model`s and OpenAPI schemas. No hand-written duplicate class to keep in sync.
+
+```python
+UserOut        = User.pydantic_model()                              # all fields
+UserWithOrders = User.pydantic_model(include=["orders.items"])      # relations, nested
+UserPublic     = User.pydantic_model(exclude=["password_hash"])
+
+@app.get("/users/{id}", response_model=UserWithOrders)
+async def get_user(id: int):
+    return await db.find_by_id(User, id, {"include": ["orders.items"]})
+```
+
+- Field types, nullability and `max_length` come from `Field(...)`. `auto_now` / `auto_now_add` fields are `datetime`, JSON fields accept any JSON.
+- Included relations are nested generated models: a list for `hasMany` / `hasManyThrough`, an optional object for `belongsTo` / `hasOne`.
+- The generated model reads ORM instances directly (`from_attributes`), so routes return the instance as-is.
+- Results are cached per arguments. Pass `name=` to choose the schema name shown in OpenAPI.
+- Needs Pydantic v2, which FastAPI installs.
+
+### REST filters (`?filter=`)
+
+Clients can send the whole query as one JSON `filter` parameter, LoopBack-style. `FilterParam` parses it, checks keys, fields, operators and relations (at any include depth) against the model, caps `limit`, and documents the parameter in OpenAPI. Bad input is an HTTP 400 with the reason.
+
+```python
+from fastapi import Depends
+from postgres_connector import FilterOptions
+from postgres_connector.fastapi import FilterParam
+
+@app.get("/users")
+async def list_users(filter: FilterOptions = Depends(FilterParam(User, max_limit=100))):
+    return await db.find(User, filter)
+```
+
+`GET /users?filter={"where":{"active":true},"order":["name ASC"],"limit":20,"include":["orders"]}`
+
+Without a `limit`, `max_limit` is used; a larger `limit` is rejected. Pass `max_limit=None` for no cap.
 
 ## Raw SQL
 

@@ -10,6 +10,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Optional, Type, Dict, List, Tuple, TYPE_CHECKING
 
+from .exceptions import ConfigurationError
 from .types import ColumnInfo, FieldDefinition
 from .registry import registry
 
@@ -466,6 +467,20 @@ class Migrator:
                     "target_table": target_cls.__table__,
                     "target_pk": target_cls._get_primary_key()
                 }
+
+        # Field(foreign_key="table.column") declares a constraint on its own,
+        # with or without a belongsTo relation on the same column. When both
+        # exist, the field's explicit reference wins.
+        for col_name, field_def in model._fields.items():
+            if not field_def.foreign_key:
+                continue
+            target_table, sep, target_col = field_def.foreign_key.partition(".")
+            if not sep or not target_table or not target_col or "." in target_col:
+                raise ConfigurationError(
+                    f"{model.__name__}.{col_name}: foreign_key must look like "
+                    f"'table.column', got {field_def.foreign_key!r}"
+                )
+            expected_fks[col_name] = {"target_table": target_table, "target_pk": target_col}
 
         up_queries = []
         down_queries = []

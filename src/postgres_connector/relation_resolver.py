@@ -24,8 +24,9 @@ Supported relation types:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
-from typing import Any, Optional, Type, Dict, List, TYPE_CHECKING
+from typing import Any, Optional, Type, Dict, List, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     from .pool import ConnectionPool
@@ -106,21 +107,118 @@ def _merge_includes(scopes: List[IncludeScope]) -> List[IncludeScope]:
 _FILTER_KEYS = ("where", "order", "limit", "skip", "fields", "include")
 
 
+def _norm_int(name: str, value: Any) -> Optional[int]:
+    """Coerce a `limit`/`skip` that arrived as an integer string, or refuse it.
+
+    JSON from API clients sends query parameters as strings ("10"), which used
+    to reach the query builder and crash as a raw TypeError in SQL text. The
+    value is now an int before it leaves the filter parse, and anything that is
+    not a non-negative integer is a QueryError the caller can map to HTTP 400.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        if isinstance(value, str):
+            try:
+                value = int(value.strip())
+            except ValueError:
+                raise QueryError(
+                    f"'{name}' must be a non-negative integer, got {value!r}."
+                ) from None
+        else:
+            raise QueryError(
+                f"'{name}' must be a non-negative integer, got {value!r}."
+            )
+    if value < 0:
+        raise QueryError(
+            f"'{name}' must be a non-negative integer, got {value!r}."
+        )
+    return int(value)
+
+
+def _norm_fields(fields: Any) -> Union[List[str], Dict[str, bool], None]:
+    """Normalise the LoopBack `Fields` shapes, as loopback-datasource-juggler's fieldsToArray does.
+
+    - a list selects those fields; a string selects one field
+    - `{name: bool}` with any true value selects only the true keys
+    - `{name: false, ...}` with only false values selects every field except
+      those; it stays a dict, since only the query builder knows the columns
+    - `{}` selects every field
+    """
+    if fields is None or isinstance(fields, (list, tuple)):
+        return fields
+    if isinstance(fields, str):
+        return [fields]
+    if isinstance(fields, dict):
+        if not fields:
+            return None
+        selected = [str(name) for name, include in fields.items() if include]
+        if selected:
+            return selected
+        return {str(name): False for name in fields}
+    raise QueryError(
+        f"'fields' must be a list of names, a name, or an object of name: bool, "
+        f"got {type(fields).__name__}."
+    )
+
+
 def _dict_to_filter(d: Dict) -> FilterOptions:
     unknown = sorted(set(d) - set(_FILTER_KEYS))
     if unknown:
         raise QueryError(f"Unknown filter key(s) {unknown}. Supported: {list(_FILTER_KEYS)}")
+    order = d.get("order")
+    if isinstance(order, str):
+        # LoopBack clients send a single "name DESC" string as one entry;
+        # iterating it character by character produced an error about a field
+        # called 'n'.
+        order = [order]
     return FilterOptions(
         where   = d.get("where"),
-        order   = d.get("order"),
-        limit   = d.get("limit"),
-        skip    = d.get("skip"),
-        fields  = d.get("fields"),
+        order   = order,
+        limit   = _norm_int("limit", d.get("limit")),
+        skip    = _norm_int("skip", d.get("skip")),
+        fields  = _norm_fields(d.get("fields")),
         include = d.get("include"),
     )
 
 
 # ── Resolver ──────────────────────────────────────────────────────────────────
+
+def stitch_keys(model_class: Type["PostgreSQLModel"], include: Optional[List[IncludeItem]]) -> List[str]:
+    """
+    Columns of `model_class` that must be selected to attach `include`'s
+    relations: the primary key for hasMany / hasOne / hasManyThrough, the
+    foreign key for belongsTo.
+    """
+    keys: List[str] = []
+    for scope in _merge_includes([_parse_include(item) for item in include or []]):
+        rel_def = model_class._relations.get(scope.relation)
+        if rel_def is None:
+            continue  # resolve() raises RelationNotDefinedError for it
+        if rel_def.relation_type == RelationType.BELONGS_TO:
+            key = rel_def.foreign_key
+        else:
+            key = model_class._get_primary_key()
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def with_keys(
+    fields: Union[List[str], Dict[str, bool], None], keys: List[str]
+) -> Union[List[str], Dict[str, bool], None]:
+    """
+    `fields` plus any of `keys` it leaves out. No projection (None) selects
+    every column already. For the exclusion form ({name: false}) the keys are
+    taken off the exclusion list instead, so it still hides everything else.
+    """
+    if not fields:
+        return fields
+    if isinstance(fields, dict):
+        kept = {name: v for name, v in fields.items() if name not in keys}
+        return kept or None
+    return list(fields) + [k for k in keys if k not in fields]
+
 
 class RelationResolver:
     """
@@ -188,6 +286,17 @@ class RelationResolver:
         # Ensure scope exists
         if not scope.scope:
             scope.scope = FilterOptions()
+
+        # A `fields` projection in the scope must still select the columns used
+        # to attach these rows to their parents, and those its own nested
+        # includes need; otherwise every relation comes back silently empty.
+        if scope.scope.fields:
+            if rel_def.relation_type in (RelationType.HAS_MANY, RelationType.HAS_ONE):
+                link = [rel_def.foreign_key]
+            else:
+                link = [target_cls._get_primary_key()]
+            needed = link + stitch_keys(target_cls, scope.scope.include)
+            scope.scope = dataclasses.replace(scope.scope, fields=with_keys(scope.scope.fields, needed))
 
         if rel_def.relation_type == RelationType.HAS_MANY:
             await self._has_many(parents, scope, rel_def, target_cls, session)
