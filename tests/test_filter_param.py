@@ -76,7 +76,8 @@ async def test_missing_filter_applies_max_limit(client):
         ({"include": ["invoices"]}, "Relation 'invoices' is not defined"),
         ({"include": [{"relation": "orders", "scope": {"where": {"amount": 1}}}]}, "Field 'amount' does not exist"),
         ({"limit": 50}, "no greater than 3"),
-        ({"limit": "2"}, "no greater than 3"),
+        ({"limit": "5"}, "no greater than 3"),
+        ({"limit": "ten"}, "'limit' must be a non-negative integer"),
     ],
 )
 async def test_bad_filters_are_400(client, flt, message):
@@ -96,3 +97,28 @@ async def test_filter_is_documented_in_openapi(client):
     params = schema["paths"]["/users"]["get"]["parameters"]
     assert [p["name"] for p in params] == ["filter"]
     assert "LoopBack-style filter" in params[0]["description"]
+
+
+async def test_numeric_string_limit_is_accepted(client):
+    # Query strings arrive as text; LoopBack (and _dict_to_filter, #46) read "2" as 2.
+    resp = await get(client, {"limit": "2"})
+    assert resp.status_code == 200 and len(resp.json()) == 2
+
+
+async def test_400_has_the_common_error_shape_with_handlers(client):
+    resp = await get(client, {"wher": {}})
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "QueryError"
+
+
+async def test_400_without_handlers_is_plain_detail(connector):
+    app = fastapi.FastAPI()
+
+    @app.get("/users")
+    async def list_users(filter: FilterOptions = Depends(FilterParam(FpUser))):
+        return []
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/users", params={"filter": json.dumps({"wher": {}})})
+    assert resp.status_code == 400
+    assert "Unknown filter key" in resp.json()["detail"]

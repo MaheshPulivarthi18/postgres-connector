@@ -64,6 +64,11 @@ ERROR_STATUS: Tuple[Tuple[Type[ConnectorError], int], ...] = (
 )
 
 
+# Set on app.state by register_exception_handlers(), so FilterParam can leave
+# its 400s to those handlers and keep one error shape across the API.
+_HANDLERS_FLAG = "postgres_connector_error_handlers"
+
+
 def error_body(exc: ConnectorError, expose_db_detail: bool = False) -> Dict[str, Any]:
     """
     The JSON body for `exc`. Postgres's DETAIL text quotes stored values
@@ -103,6 +108,7 @@ def register_exception_handlers(app: Any, expose_db_detail: bool = False) -> Non
 
     for error_cls, status in ERROR_STATUS:
         app.add_exception_handler(error_cls, handler_for(status))
+    setattr(app.state, _HANDLERS_FLAG, True)
 
 
 # ── ?filter= query parameter ─────────────────────────────────────────────────
@@ -146,12 +152,12 @@ def parse_filter(model: Type[PostgreSQLModel], raw: Optional[str], max_limit: Op
         if max_limit is not None:
             if opts.limit is None:
                 opts.limit = max_limit
-            elif not isinstance(opts.limit, int) or isinstance(opts.limit, bool) or opts.limit > max_limit:
+            elif opts.limit > max_limit:  # already a non-negative int (_dict_to_filter)
                 raise QueryError(f"'limit' must be an integer no greater than {max_limit}")
         validate_filter(model, opts)
     except RelationNotDefinedError as exc:
         raise QueryError(str(exc)) from exc
-    except (TypeError, ValueError) as exc:  # wrong value shapes, e.g. a string limit or skip
+    except (TypeError, ValueError) as exc:  # wrong value shapes inside where/order
         raise QueryError(f"Invalid filter: {exc}") from exc
     return opts
 
@@ -160,19 +166,27 @@ def FilterParam(model: Type[PostgreSQLModel], max_limit: Optional[int] = 100) ->
     """
     A FastAPI dependency that reads `?filter=<json>`, validates it against
     `model` and returns FilterOptions for `find()` / `find_and_count()`.
-    Invalid filters are HTTP 400 with the QueryError message. The parameter
-    is documented in the OpenAPI schema.
+    Invalid filters are HTTP 400 with the QueryError message: with
+    register_exception_handlers() installed the body has the same
+    {"error", "detail"} shape as every other library error, otherwise it is
+    FastAPI's plain {"detail"}. The parameter is documented in the OpenAPI
+    schema.
 
         @app.get("/users")
         async def list_users(filter: FilterOptions = Depends(FilterParam(User, max_limit=100))):
             return await db.find(User, filter)
     """
-    from fastapi import HTTPException, Query
+    from fastapi import HTTPException, Query, Request
 
-    def dependency(filter: Optional[str] = Query(None, description=FILTER_DESCRIPTION)) -> FilterOptions:
+    def dependency(request: Request, filter: Optional[str] = Query(None, description=FILTER_DESCRIPTION)) -> FilterOptions:
         try:
             return parse_filter(model, filter, max_limit)
         except QueryError as exc:
+            if getattr(request.app.state, _HANDLERS_FLAG, False):
+                raise  # the registered QueryError handler answers 400 in the common shape
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Request is imported lazily, so the string annotation (PEP 563) can't be
+    # resolved from module globals; give FastAPI the class itself.
+    dependency.__annotations__["request"] = Request
     return dependency
