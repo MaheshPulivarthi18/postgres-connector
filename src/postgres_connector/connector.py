@@ -108,9 +108,11 @@ def _translate_integrity_error(exc: "asyncpg.exceptions.IntegrityConstraintViola
 # Bad values: the server's SQLSTATE class 22 errors, and asyncpg's client-side
 # DataError for a Python value it can't encode as the parameter's type
 # (e.g. 'abc' for an integer). The two are unrelated classes in asyncpg.
-_DATA_ERRORS: Tuple[type, ...] = (
-    asyncpg.exceptions.DataError,
-    asyncpg.exceptions._base.DataError,
+_DATA_ERRORS: Tuple[type, ...] = tuple(
+    cls for cls in (
+        asyncpg.exceptions.DataError,
+        getattr(getattr(asyncpg.exceptions, "_base", None), "DataError", None),  # private path; guard a rename
+    ) if cls is not None
 ) if asyncpg else ()
 
 
@@ -146,6 +148,10 @@ async def _translate_db_errors(timeout: Optional[float] = None):
         raise InvalidValueError(str(exc), detail=getattr(exc, "detail", None)) from exc
     except asyncpg.exceptions.ReadOnlySQLTransactionError as exc:  # type: ignore[union-attr]
         raise ReadOnlyTransactionError(str(exc)) from exc
+
+
+# asyncpg's limit on bind parameters in one statement.
+_MAX_QUERY_ARGS = 32767
 
 
 def _value_matches_type(value: Any, python_type: type) -> bool:
@@ -368,6 +374,8 @@ class PostgreSQLConnector:
             })
             print(user.id)   # populated
         """
+        self._reject_unknown_fields(model, data)
+
         # Stamp auto_now_add (unless given) and auto_now — on a copy, so the
         # caller's dict is never mutated. Same rules as upsert().
         data = dict(data)
@@ -433,6 +441,8 @@ class PostgreSQLConnector:
         """
         if not records:
             return []
+        for data in records:
+            self._reject_unknown_fields(model, data)
 
         now = datetime.utcnow()
 
@@ -446,7 +456,7 @@ class PostgreSQLConnector:
                 if field_def.auto_now_add and name not in row:
                     row[name] = now
                 elif name not in row and name in model._field_defaults:
-                    row[name] = model._field_defaults[name]
+                    row[name] = model._default_for(name)
             # Skip auto-increment PK if not provided
             for name, field_def in model._fields.items():
                 if field_def.auto_increment and name not in row:
@@ -458,36 +468,57 @@ class PostgreSQLConnector:
         columns = sorted(all_columns)
         col_sql = ", ".join([f'"{c}"' for c in columns])
 
-        # Build multi-row VALUES. JSON/JSONB values are left as native
-        # Python objects — the connection-level type codec (pool.py's
-        # _init_connection) handles serialization; dumping here too would
-        # double-encode them into a JSON string scalar instead of an object.
-        param_idx = 0
-        all_params: List[Any] = []
-        value_groups: List[str] = []
-        for row in normalized:
-            placeholders = []
-            for col in columns:
-                # A column some other record sets but this one omits gets the
-                # column's DEFAULT (serial id, server default) — not NULL.
-                if col not in row:
-                    placeholders.append("DEFAULT")
-                    continue
-                val = row[col]
-                param_idx += 1
-                placeholders.append(f"${param_idx}")
-                all_params.append(val)
-            value_groups.append(f"({', '.join(placeholders)})")
+        def build_insert(chunk: List[Dict[str, Any]]) -> Tuple[str, List[Any]]:
+            # Build multi-row VALUES. JSON/JSONB values are left as native
+            # Python objects — the connection-level type codec (pool.py's
+            # _init_connection) handles serialization; dumping here too would
+            # double-encode them into a JSON string scalar instead of an object.
+            param_idx = 0
+            params: List[Any] = []
+            value_groups: List[str] = []
+            for row in chunk:
+                placeholders = []
+                for col in columns:
+                    # A column some other record sets but this one omits gets the
+                    # column's DEFAULT (serial id, server default) — not NULL.
+                    if col not in row:
+                        placeholders.append("DEFAULT")
+                        continue
+                    param_idx += 1
+                    placeholders.append(f"${param_idx}")
+                    params.append(row[col])
+                value_groups.append(f"({', '.join(placeholders)})")
+            sql = f'INSERT INTO "{model.__table__}" ({col_sql}) VALUES {", ".join(value_groups)} RETURNING *'
+            return sql, params
 
-        sql = f'INSERT INTO "{model.__table__}" ({col_sql}) VALUES {", ".join(value_groups)} RETURNING *'
+        # asyncpg accepts at most 32,767 bind parameters per statement, so big
+        # batches go out as several INSERTs. They share one transaction (the
+        # caller's, if `session` is given), so create_many() stays all-or-nothing.
+        per_statement = max(1, _MAX_QUERY_ARGS // max(1, len(columns)))
+        chunks = [normalized[i:i + per_statement] for i in range(0, len(normalized), per_statement)]
+
+        async def insert_all(conn: Any) -> List[Dict[str, Any]]:
+            out: List[Dict[str, Any]] = []
+            for chunk in chunks:
+                sql, params = build_insert(chunk)
+                self._pool.log_query(sql, params)
+                out.extend(dict(r) for r in await conn.fetch(sql, *params))
+            return out
 
         async with _translate_db_errors():
-            if session:
-                self._pool.log_query(sql, all_params)
-                raw_rows = await session.fetch(sql, *all_params)
-                rows = [dict(r) for r in raw_rows]
+            if len(chunks) == 1:
+                sql, params = build_insert(chunks[0])
+                if session:
+                    self._pool.log_query(sql, params)
+                    rows = [dict(r) for r in await session.fetch(sql, *params)]
+                else:
+                    rows = await self._pool.fetch_all(sql, params)
+            elif session:
+                async with session.transaction():  # a savepoint inside the caller's transaction
+                    rows = await insert_all(session)
             else:
-                rows = await self._pool.fetch_all(sql, all_params)
+                async with self._pool.transaction() as conn:
+                    rows = await insert_all(conn)
 
         instances = [model._from_row(row) for row in rows]
         return instances
@@ -585,6 +616,23 @@ class PostgreSQLConnector:
 
         self._validate_field_types(model, prepared)
         return prepared
+
+    @staticmethod
+    def _reject_unknown_fields(model: Type[PostgreSQLModel], data: Dict[str, Any]) -> None:
+        """
+        Raise QueryError for keys that are not fields of `model`, so a typo in
+        a write payload fails loudly instead of silently dropping the value.
+        Same message as the filter and update paths.
+        """
+        for key in data:
+            if key in model._fields:
+                continue
+            if key in model._relations:
+                raise QueryError(
+                    f"'{key}' is a relation on model '{model.__table__}'; "
+                    f"relations are not writable via create(). Create the related rows separately."
+                )
+            raise QueryError(f"Field '{key}' does not exist on model '{model.__table__}'")
 
     def _validate_field_types(self, model: Type[PostgreSQLModel], data: Dict[str, Any]) -> None:
         for name, value in data.items():
@@ -739,6 +787,34 @@ class PostgreSQLConnector:
         sql, params = qb.build_count(where)
         rows = await self._fetch(sql, params, session=session, retryable=True)
         return int(rows[0].get("_count", 0)) if rows else 0
+
+    async def find_and_count(
+        self,
+        model:  Type[PostgreSQLModel],
+        filter: Union[dict, FilterOptions] = {},
+        session: Optional[Any] = None,
+    ) -> Tuple[List[PostgreSQLModel], int]:
+        """
+        One page of results plus the total number of matches, for paginated
+        endpoints. `filter` is the same as for find(); the count uses only
+        its `where` (no limit/skip/order/include).
+
+        Without a session the two queries run concurrently on two pooled
+        connections. Inside begin() / with `session=` they run one after the
+        other on that connection, since a connection runs one query at a time.
+
+        Example:
+            users, total = await connector.find_and_count(
+                User, {"where": {"active": True}, "limit": 20, "skip": 40}
+            )
+        """
+        opts = self._to_filter(filter)
+        where = opts.where or {}
+        if session is not None:
+            items = await self.find(model, opts, session=session)
+            return items, await self.count(model, where, session=session)
+        items, total = await asyncio.gather(self.find(model, opts), self.count(model, where))
+        return items, total
 
     async def exists(
         self,

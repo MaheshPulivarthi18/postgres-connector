@@ -20,7 +20,7 @@ Supports:
 
 from __future__ import annotations
 
-from typing import Any, Optional, Dict, List, Tuple
+from typing import Any, Optional, Dict, List, Tuple, Union
 
 from .types import FieldDefinition, FilterOptions
 from .exceptions import QueryError
@@ -338,14 +338,21 @@ class QueryBuilder:
 
     # ── Clause builders ───────────────────────────────────────────────────
 
-    def _select_columns(self, fields: Optional[List[str]]) -> str:
+    def _select_columns(self, fields: Union[List[str], Dict[str, bool], None]) -> str:
+        if isinstance(fields, dict):
+            # LoopBack's {name: false} form: every column except these.
+            for f in fields:
+                self._validate_field(f)
+            fields = [f for f in self.fields if f not in fields]
+            if not fields:
+                raise QueryError("'fields' excludes every field of the model.")
         if fields:
             for f in fields:
                 self._validate_field(f)
             return ", ".join(f'"{self.table}"."{f}"' for f in fields)
         return f'"{self.table}".*'
 
-    def _select_clause(self, fields: Optional[List[str]]) -> str:
+    def _select_clause(self, fields: Union[List[str], Dict[str, bool], None]) -> str:
         return f'SELECT {self._select_columns(fields)} FROM "{self.table}"'
 
     def _where_clause(self, where: Optional[Dict[str, Any]]) -> str:
@@ -416,11 +423,22 @@ class QueryBuilder:
         if op in ("inq", "nin"):
             if not isinstance(value, (list, tuple, set)):
                 raise QueryError(f"Operator '{op}' requires a list/tuple value.")
-            values = list(value)
+            values = [v for v in value if v is not None]
+            has_null = len(values) < len(value)
+            column = f'"{self.table}"."{field}"'
+            # SQL never matches NULL with IN, and `x NOT IN (..., NULL)` is never
+            # true, so a None in the list is turned into IS [NOT] NULL, the same
+            # way {"field": None} and {"neq": None} are.
             if not values:
+                if has_null:
+                    return f"{column} IS NULL" if op == "inq" else f"{column} IS NOT NULL"
                 return "1=0" if op == "inq" else "1=1"
-            placeholders = self._placeholders(values)
-            return f'"{self.table}"."{field}" {sql_op} ({placeholders})'
+            clause = f"{column} {sql_op} ({self._placeholders(values)})"
+            if not has_null:
+                return clause
+            if op == "inq":
+                return f"({clause} OR {column} IS NULL)"
+            return f"({clause} AND {column} IS NOT NULL)"
 
         elif op == "between":
             if not isinstance(value, (list, tuple)) or len(value) != 2:

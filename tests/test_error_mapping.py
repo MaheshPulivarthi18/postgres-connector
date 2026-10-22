@@ -104,3 +104,26 @@ async def test_wrong_payload_type_is_400(client):
     resp = await client.post("/users", json={"email": "a@x", "name": "a", "age": "old"})
     assert resp.status_code == 400
     assert resp.json()["error"] == "ConfigurationError"
+
+
+async def test_duplicate_body_does_not_quote_stored_values_by_default(client):
+    await client.post("/users", json={"email": "raj@x.io", "name": "raj"})
+    resp = await client.post("/users", json={"email": "raj@x.io", "name": "raj"})
+    assert resp.status_code == 409
+    assert "raj@x.io" not in resp.text
+    assert "db_detail" not in resp.json()
+
+
+async def test_expose_db_detail_adds_postgres_detail(connector, table):
+    app = fastapi.FastAPI()
+    register_exception_handlers(app, expose_db_detail=True)
+
+    @app.post("/users")
+    async def create_user(payload: dict):
+        return (await connector.create(EmUser, payload)).to_dict()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        await c.post("/users", json={"email": "raj@x.io", "name": "raj"})
+        resp = await c.post("/users", json={"email": "raj@x.io", "name": "raj"})
+    assert resp.status_code == 409
+    assert resp.json()["db_detail"] == "Key (email)=(raj@x.io) already exists."
