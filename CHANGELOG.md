@@ -1,5 +1,33 @@
 # Changelog
 
+## [Unreleased]
+
+FastAPI integration, LoopBack filter compatibility, and fixes from the 2.0.0 review.
+
+### Added
+- `Model.observe(event, fn)` for any number of hooks per event, and an `after_delete` hook (#28).
+- `find_and_count()`: one page plus the total, run concurrently (#59).
+- `postgres_connector.fastapi`: `register_exception_handlers(app)` maps library errors to HTTP statuses (#60), and `FilterParam(Model, max_limit=...)` reads a LoopBack-style `?filter=` query parameter (#61).
+- `Model.pydantic_model(include=..., exclude=...)` for FastAPI `response_model`s and OpenAPI schemas (#62). Needs Pydantic 2, now required by the `fastapi` extra.
+- `InvalidValueError` (bad values, SQLSTATE class 22) and `ReadOnlyTransactionError` instead of raw asyncpg errors (#60).
+- Benchmarks against SQLAlchemy 2.x in `benchmarks/` (#29).
+
+### Changed
+- `create()`/`create_many()` raise `QueryError` for keys that aren't model fields; they used to drop them silently (#50).
+- Hook methods from every mixin run, bases first, then the model's own. A model hook that calls `super()` to reach a mixin's hook now runs it twice; remove the `super()` call (#53).
+- `migrate()` creates foreign-key constraints for `Field(foreign_key="table.column")`. On an existing database, rows that point at a missing parent must be fixed before migrating (#54).
+- Models are iterable: `dict(instance) == instance.to_dict()`, so FastAPI routes can return them as-is (#58).
+- LoopBack filter shapes: `order` as a string, `limit`/`skip` as numeric strings, `fields` as a string or `{name: bool}`. `{name: false}` selects every other field (#46, #64).
+
+### Fixed
+- `Field()`/`Relation()` options declared on plain mixin classes were lost (#27).
+- Unsaved instances (primary key `None`) compared equal and collapsed in sets (#47).
+- Mutable defaults such as `JSONField(default={})` were shared between instances (#49).
+- `inq`/`nin` with `None` in the list matched nothing (#51).
+- README examples failed on Python 3.8 (#52).
+- `create_many()` failed above asyncpg's 32,767 query arguments; large batches are now split inside one transaction (#57).
+- An include came back empty when `fields` left out the key columns (#56).
+
 ## [2.0.0] - 2026-10-21
 
 A leaner API, focused on what a LoopBack-style FastAPI ORM needs, plus a round of correctness fixes.

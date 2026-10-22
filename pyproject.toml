@@ -64,6 +64,7 @@ Changelog     = "https://gitlab.com/MaheshPulivarthi181/postgres-orm-connector/-
 [project.optional-dependencies]
 fastapi = [
     "fastapi>=0.110.0",
+    "pydantic>=2.0",
     "uvicorn[standard]>=0.29.0",
 ]
 test = [
