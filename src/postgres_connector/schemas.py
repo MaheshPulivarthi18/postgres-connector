@@ -50,6 +50,7 @@ def pydantic_model(
     include: Iterable[str] = (),
     exclude: Iterable[str] = (),
     name: Optional[str] = None,
+    all_optional: bool = False,
 ) -> Any:
     """See PostgreSQLModel.pydantic_model()."""
     from pydantic import ConfigDict, create_model
@@ -58,7 +59,7 @@ def pydantic_model(
     from .registry import registry
 
     include, exclude = tuple(include), tuple(exclude)
-    key = (model, include, exclude, name)
+    key = (model, include, exclude, name, all_optional)
     if key in _cache:
         return _cache[key]
 
@@ -74,7 +75,7 @@ def pydantic_model(
         constraints: Dict[str, Any] = {}
         if fdef.max_length and fdef.python_type is str and not fdef.is_json:
             constraints["max_length"] = fdef.max_length
-        if fdef.nullable and not fdef.primary_key:
+        if all_optional or (fdef.nullable and not fdef.primary_key):
             fields[fname] = (Optional[annotation], PydanticField(None, **constraints))
         else:
             fields[fname] = (annotation, PydanticField(..., **constraints))
@@ -86,7 +87,7 @@ def pydantic_model(
                 f"{model.__name__}.pydantic_model(): include has unknown relation '{rel_name}'"
             )
         target = registry.get(rel.target_model)
-        sub = pydantic_model(target, include=nested)
+        sub = pydantic_model(target, include=nested, all_optional=all_optional)
         if rel.relation_type in (RelationType.HAS_MANY, RelationType.HAS_MANY_THROUGH):
             fields[rel_name] = (List[sub], PydanticField(default_factory=list))
         else:
@@ -94,7 +95,7 @@ def pydantic_model(
 
     model_name = name or model.__name__ + "".join(
         "With" + part.replace(".", "_").title().replace("_", "") for part in include
-    ) + ("Public" if exclude else "") + "Out"
+    ) + ("Public" if exclude else "") + ("Partial" if all_optional else "") + "Out"
     generated = create_model(  # type: ignore[call-overload]
         model_name,
         __config__=ConfigDict(from_attributes=True),
