@@ -202,6 +202,18 @@ async def audit(order):
 
 Events: `before_create`, `after_create`, `before_update` (also receives the `data` being set, which it may change), `after_update`, `before_delete`, `after_delete`. Raising from a `before_*` hook aborts the write.
 
+## Pagination
+
+`find_and_count()` returns one page and the total number of matches, for list endpoints. It takes the same filter as `find()`; the count uses only `where`.
+
+```python
+users, total = await connector.find_and_count(
+    User, {"where": {"active": True}, "order": ["id ASC"], "limit": 20, "skip": 40}
+)
+```
+
+The two queries run concurrently on two pooled connections. Inside `begin()` (`await tx.find_and_count(...)`) they run one after the other on the transaction's connection.
+
 ## Upsert
 
 `INSERT ... ON CONFLICT (...) DO UPDATE` in one round trip — no race between a check-then-write. `conflict_target` must have a unique or primary-key constraint in the database (Postgres requires this to detect the conflict).

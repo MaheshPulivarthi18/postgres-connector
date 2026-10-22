@@ -18,7 +18,7 @@ own without aborting the outer transaction.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict, List, Optional, Type, TYPE_CHECKING, Union
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Type, TYPE_CHECKING, Union
 
 from .types import FilterOptions
 
@@ -122,6 +122,13 @@ class TransactionContext:
         where: Dict[str, Any] = {},
     ) -> int:
         return await self._connector.count(model, where, session=self._conn)
+
+    async def find_and_count(
+        self,
+        model:  Type["PostgreSQLModel"],
+        filter: Union[dict, FilterOptions] = {},
+    ) -> Tuple[List["PostgreSQLModel"], int]:
+        return await self._connector.find_and_count(model, filter, session=self._conn)
 
     async def exists(
         self,

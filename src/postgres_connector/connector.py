@@ -771,6 +771,34 @@ class PostgreSQLConnector:
         rows = await self._fetch(sql, params, session=session, retryable=True)
         return int(rows[0].get("_count", 0)) if rows else 0
 
+    async def find_and_count(
+        self,
+        model:  Type[PostgreSQLModel],
+        filter: Union[dict, FilterOptions] = {},
+        session: Optional[Any] = None,
+    ) -> Tuple[List[PostgreSQLModel], int]:
+        """
+        One page of results plus the total number of matches, for paginated
+        endpoints. `filter` is the same as for find(); the count uses only
+        its `where` (no limit/skip/order/include).
+
+        Without a session the two queries run concurrently on two pooled
+        connections. Inside begin() / with `session=` they run one after the
+        other on that connection, since a connection runs one query at a time.
+
+        Example:
+            users, total = await connector.find_and_count(
+                User, {"where": {"active": True}, "limit": 20, "skip": 40}
+            )
+        """
+        opts = self._to_filter(filter)
+        where = opts.where or {}
+        if session is not None:
+            items = await self.find(model, opts, session=session)
+            return items, await self.count(model, where, session=session)
+        items, total = await asyncio.gather(self.find(model, opts), self.count(model, where))
+        return items, total
+
     async def exists(
         self,
         model: Type[PostgreSQLModel],
