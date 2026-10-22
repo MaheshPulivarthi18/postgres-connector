@@ -318,7 +318,7 @@ class PostgreSQLModel(metaclass=ModelMeta):
             email:  str           = Field(unique=True)
             active: bool          = Field(default=True)
 
-            orders: list["Order"] = Relation(type="hasMany", foreign_key="user_id")
+            orders: List["Order"] = Relation(type="hasMany", foreign_key="user_id")
     """
 
     # ── Class-level metadata (set by ModelMeta) ───────────────────────────

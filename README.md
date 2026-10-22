@@ -31,6 +31,8 @@ pip install oceanic-postgres-orm
 ## Quick Start
 
 ```python
+from typing import List
+
 from postgres_connector import PostgreSQLConnector, PostgreSQLModel, Field, Relation
 
 class User(PostgreSQLModel):
@@ -39,7 +41,7 @@ class User(PostgreSQLModel):
     name:   str           = Field(max_length=100)
     email:  str           = Field(unique=True)
     active: bool          = Field(default=True)
-    orders: list["Order"] = Relation(type="hasMany", foreign_key="user_id")
+    orders: List["Order"] = Relation(type="hasMany", foreign_key="user_id")
 
 class Order(PostgreSQLModel):
     __table__ = "orders"
@@ -136,15 +138,17 @@ users = await connector.find(User, {
 ## Relations
 
 ```python
+from typing import List
+
 class User(PostgreSQLModel):
     __table__ = "users"
     id:      int              = Field(primary_key=True)
     # hasMany
-    orders:  list["Order"]   = Relation(type="hasMany",   foreign_key="user_id")
+    orders:  List["Order"]   = Relation(type="hasMany",   foreign_key="user_id")
     # hasOne
     profile: "Profile"       = Relation(type="hasOne",    foreign_key="user_id")
     # hasManyThrough
-    tags:    list["Tag"]     = Relation(
+    tags:    List["Tag"]     = Relation(
         type="hasManyThrough",
         through="UserTag",
         foreign_key="user_id",

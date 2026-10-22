@@ -10,7 +10,7 @@ Usage in a model:
         email:  str  = Field(unique=True)
         active: bool = Field(default=True)
 
-        orders: list["Order"] = Relation(type="hasMany", foreign_key="user_id")
+        orders: List["Order"] = Relation(type="hasMany", foreign_key="user_id")
 """
 
 from __future__ import annotations
@@ -120,7 +120,7 @@ class Relation:
 
     Examples:
         # User hasMany Order
-        orders: list["Order"] = Relation(type="hasMany", foreign_key="user_id")
+        orders: List["Order"] = Relation(type="hasMany", foreign_key="user_id")
 
         # Order belongsTo User
         user: "User" = Relation(type="belongsTo", foreign_key="user_id")
@@ -129,7 +129,7 @@ class Relation:
         profile: "Profile" = Relation(type="hasOne", foreign_key="user_id")
 
         # Product hasManyThrough Order via OrderItem
-        orders: list["Order"] = Relation(
+        orders: List["Order"] = Relation(
             type="hasManyThrough",
             through="OrderItem",
             foreign_key="product_id",
