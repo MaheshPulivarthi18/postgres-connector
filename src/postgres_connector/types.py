@@ -71,7 +71,7 @@ class FilterOptions:
     order:   Optional[List[str]]                             = None
     limit:   Optional[int]                                   = None
     skip:    Optional[int]                                   = None
-    fields:  Optional[List[str]]                             = None
+    fields:  Union[List[str], Dict[str, bool], None]         = None
     include: Optional[List[Union[str, dict, IncludeScope]]]  = None
 
 

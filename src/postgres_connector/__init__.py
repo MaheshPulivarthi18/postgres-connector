@@ -3,6 +3,8 @@ postgres_connector — A production-grade async PostgreSQL connector with
 LoopBack-style nested relation queries and typed model instances.
 
 Quick start:
+    from typing import List
+
     from postgres_connector import PostgreSQLConnector, PostgreSQLModel, Field, Relation
 
     class User(PostgreSQLModel):
@@ -10,7 +12,7 @@ Quick start:
         id:     int           = Field(primary_key=True)
         name:   str           = Field(max_length=100)
         email:  str           = Field(unique=True)
-        orders: list["Order"] = Relation(type="hasMany", foreign_key="user_id")
+        orders: List["Order"] = Relation(type="hasMany", foreign_key="user_id")
 
     class Order(PostgreSQLModel):
         __table__ = "orders"

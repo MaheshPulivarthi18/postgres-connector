@@ -20,7 +20,7 @@ Built on [`asyncpg`](https://github.com/MagicStack/asyncpg) — the fastest Post
 - **Typed error mapping** — unique/FK/not-null/check violations become `UniqueConstraintError`/etc., not raw `asyncpg` exceptions
 - **Upsert** — `INSERT ... ON CONFLICT DO UPDATE`/`DO NOTHING` in one round trip
 - **JSONB support** — `JSONField` for dict/list columns with auto serialization
-- **FastAPI ready** — `__json__()` hook for response serialization
+- **FastAPI ready** — return models (or lists of models) from routes as-is; they serialize like `to_dict()`
 
 ## Installation
 
@@ -31,6 +31,8 @@ pip install oceanic-postgres-orm
 ## Quick Start
 
 ```python
+from typing import List
+
 from postgres_connector import PostgreSQLConnector, PostgreSQLModel, Field, Relation
 
 class User(PostgreSQLModel):
@@ -39,7 +41,7 @@ class User(PostgreSQLModel):
     name:   str           = Field(max_length=100)
     email:  str           = Field(unique=True)
     active: bool          = Field(default=True)
-    orders: list["Order"] = Relation(type="hasMany", foreign_key="user_id")
+    orders: List["Order"] = Relation(type="hasMany", foreign_key="user_id")
 
 class Order(PostgreSQLModel):
     __table__ = "orders"
@@ -136,15 +138,17 @@ users = await connector.find(User, {
 ## Relations
 
 ```python
+from typing import List
+
 class User(PostgreSQLModel):
     __table__ = "users"
     id:      int              = Field(primary_key=True)
     # hasMany
-    orders:  list["Order"]   = Relation(type="hasMany",   foreign_key="user_id")
+    orders:  List["Order"]   = Relation(type="hasMany",   foreign_key="user_id")
     # hasOne
     profile: "Profile"       = Relation(type="hasOne",    foreign_key="user_id")
     # hasManyThrough
-    tags:    list["Tag"]     = Relation(
+    tags:    List["Tag"]     = Relation(
         type="hasManyThrough",
         through="UserTag",
         foreign_key="user_id",
@@ -173,11 +177,17 @@ class Order(TimestampMixin, PostgreSQLModel):
     id: int = Field(primary_key=True)
 ```
 
-A mixin's `Field(...)` options, `Relation(...)`s and hook methods apply to every model that inherits it.
+A mixin's `Field(...)` options, `Relation(...)`s and hook methods apply to every model that inherits it. Hook methods from mixins add up: if two mixins both define `before_create`, both run.
 
 ## Hooks
 
-Write a hook as a method on the model (or on a mixin), or register any number with `observe()`. The method runs first, then observers in registration order. Observers on a model also apply to its subclasses.
+Write a hook as a method on the model (or on a mixin), or register any number with `observe()`. For each event, hooks run in this order:
+
+1. hook methods from mixins, base classes first (for `class Doc(A, B, PostgreSQLModel)`, `B`'s then `A`'s)
+2. the model's own hook method (a subclass model's method replaces its parent model's, as usual)
+3. observers, in registration order (observers on a model also apply to its subclasses)
+
+Mixin hooks run on their own, so a model's hook should not call `super()` to reach them; that would run the mixin's hook twice.
 
 ```python
 class Order(PostgreSQLModel):
@@ -191,6 +201,18 @@ async def audit(order):
 ```
 
 Events: `before_create`, `after_create`, `before_update` (also receives the `data` being set, which it may change), `after_update`, `before_delete`, `after_delete`. Raising from a `before_*` hook aborts the write.
+
+## Pagination
+
+`find_and_count()` returns one page and the total number of matches, for list endpoints. It takes the same filter as `find()`; the count uses only `where`.
+
+```python
+users, total = await connector.find_and_count(
+    User, {"where": {"active": True}, "order": ["id ASC"], "limit": 20, "skip": 40}
+)
+```
+
+The two queries run concurrently on two pooled connections. Inside `begin()` (`await tx.find_and_count(...)`) they run one after the other on the transaction's connection.
 
 ## Upsert
 
@@ -314,6 +336,26 @@ register_exception_handlers(app)
 | `QueryTimeoutError` | 504 |
 
 The body is `{"error": "<class name>", "detail": "<message>"}`, plus `constraint`, `table`, `column` and `db_detail` when Postgres reported them. To shape responses differently, register your own handlers with `@app.exception_handler(...)` instead, or after this call to override one class.
+
+## Pydantic models for FastAPI
+
+`Model.pydantic_model()` generates a Pydantic model from the fields and relations the model already declares, for `response_model`s and OpenAPI schemas. No hand-written duplicate class to keep in sync.
+
+```python
+UserOut        = User.pydantic_model()                              # all fields
+UserWithOrders = User.pydantic_model(include=["orders.items"])      # relations, nested
+UserPublic     = User.pydantic_model(exclude=["password_hash"])
+
+@app.get("/users/{id}", response_model=UserWithOrders)
+async def get_user(id: int):
+    return await db.find_by_id(User, id, {"include": ["orders.items"]})
+```
+
+- Field types, nullability and `max_length` come from `Field(...)`. `auto_now` / `auto_now_add` fields are `datetime`, JSON fields accept any JSON.
+- Included relations are nested generated models: a list for `hasMany` / `hasManyThrough`, an optional object for `belongsTo` / `hasOne`.
+- The generated model reads ORM instances directly (`from_attributes`), so routes return the instance as-is.
+- Results are cached per arguments. Pass `name=` to choose the schema name shown in OpenAPI.
+- Needs Pydantic v2, which FastAPI installs.
 
 ## Raw SQL
 
