@@ -20,7 +20,7 @@ Built on [`asyncpg`](https://github.com/MagicStack/asyncpg) — the fastest Post
 - **Typed error mapping** — unique/FK/not-null/check violations become `UniqueConstraintError`/etc., not raw `asyncpg` exceptions
 - **Upsert** — `INSERT ... ON CONFLICT DO UPDATE`/`DO NOTHING` in one round trip
 - **JSONB support** — `JSONField` for dict/list columns with auto serialization
-- **FastAPI ready** — `__json__()` hook for response serialization
+- **FastAPI ready** — return models (or lists of models) from routes as-is; they serialize like `to_dict()`
 
 ## Installation
 

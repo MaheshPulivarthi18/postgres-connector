@@ -7,7 +7,7 @@ Features:
   - Typed instance creation from raw DB rows
   - Relation access protection (RelationNotLoadedError if not included)
   - .to_dict() / .to_json() serialization with nested relations
-  - Pydantic-compatible __json__ hook for FastAPI responses
+  - dict(instance) == instance.to_dict(), so FastAPI can return models directly
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import inspect
 import json
 import sys
 from typing import (
-    Any, Callable, ClassVar, Optional, Type, Union, Dict, List,
+    Any, Callable, ClassVar, Iterator, Optional, Type, Tuple, Union, Dict, List,
     get_args, get_origin,
 )
 
@@ -548,8 +548,18 @@ class PostgreSQLModel(metaclass=ModelMeta):
         """Serialize to a JSON string."""
         return json.dumps(self.to_dict(), default=str, indent=indent)
 
-    # FastAPI / Pydantic compatibility hook
+    def __iter__(self) -> Iterator[Tuple[str, Any]]:
+        """
+        Yield `(name, value)` pairs of `to_dict()`, so `dict(instance)` is the
+        instance's public data. FastAPI's `jsonable_encoder` serializes
+        objects it doesn't know with `dict(obj)`, which makes a model (or a
+        list of models) returnable from a route as-is: loaded relations under
+        their names, unloaded ones omitted, no internal attributes.
+        """
+        return iter(self.to_dict().items())
+
     def __json__(self) -> Dict[str, Any]:
+        """Same as `to_dict()`; kept for code that calls it directly."""
         return self.to_dict()
 
     # ── Magic methods ─────────────────────────────────────────────────────
