@@ -214,6 +214,15 @@ users, total = await connector.find_and_count(
 
 The two queries run concurrently on two pooled connections. Inside `begin()` (`await tx.find_and_count(...)`) they run one after the other on the transaction's connection.
 
+## Bulk insert
+
+```python
+users = await connector.create_many(User, rows)                     # instances, ids filled in
+count = await connector.create_many(Event, rows, returning=False)   # just the row count, via COPY
+```
+
+`create_many()` validates and fills defaults like `create()`, and stays all-or-nothing however many rows you pass. With `returning=False` it sends the rows with PostgreSQL's `COPY` instead of `INSERT ... RETURNING`, 2–4× faster for 1,000–50,000 rows, for imports, event logs and seeding. If records leave out different columns, it uses `INSERT` without `RETURNING` instead, since COPY can't fill per-row defaults. Works in a transaction too: `await tx.create_many(..., returning=False)`.
+
 ## Upsert
 
 `INSERT ... ON CONFLICT (...) DO UPDATE` in one round trip — no race between a check-then-write. `conflict_target` must have a unique or primary-key constraint in the database (Postgres requires this to detect the conflict).
@@ -436,7 +445,7 @@ await connector.find(Post, {"where": {"deleted_at": None}})
 
 ## Performance
 
-Against the SQLAlchemy 2.x async ORM on the same database and data, this library is roughly 1.1–2.6× faster per call. The largest gain is on nested includes (2.5×), the smallest on database-bound queries (1.1×). SQLAlchemy Core is faster for bulk inserts. Methodology, full results and the scripts to re-run them are in [`benchmarks/`](benchmarks/README.md).
+Against the SQLAlchemy 2.x async ORM on the same database and data, this library is roughly 1.1–2.6× faster per call. The largest gain is on nested includes (2.5×), the smallest on database-bound queries (1.1×). SQLAlchemy Core matches `create_many()` on bulk inserts; `create_many(..., returning=False)` uses COPY and is 2–4× faster than that. Methodology, full results and the scripts to re-run them are in [`benchmarks/`](benchmarks/README.md).
 
 ## Full-Feature Verification
 

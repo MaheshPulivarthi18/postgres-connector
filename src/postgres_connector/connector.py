@@ -440,19 +440,27 @@ class PostgreSQLConnector:
         model: Type[PostgreSQLModel],
         records: List[Dict[str, Any]],
         session: Optional[Any] = None,
-    ) -> List[PostgreSQLModel]:
+        returning: bool = True,
+    ) -> Union[List[PostgreSQLModel], int]:
         """
         Bulk insert multiple rows in a single INSERT statement.
         Returns a list of created model instances with PKs populated.
+
+        `returning=False` skips building instances and returns the number of
+        rows inserted. The rows then go through PostgreSQL's COPY, several
+        times faster for big batches (imports, logs, seeding). Records that
+        leave out different columns need per-row DEFAULTs, which COPY can't
+        express, so they use INSERT without RETURNING instead.
 
         Example:
             users = await connector.create_many(User, [
                 {"name": "Alice", "email": "alice@example.com"},
                 {"name": "Bob", "email": "bob@example.com"},
             ])
+            count = await connector.create_many(Event, rows, returning=False)
         """
         if not records:
-            return []
+            return [] if returning else 0
         for data in records:
             self._reject_unknown_fields(model, data)
 
@@ -500,8 +508,13 @@ class PostgreSQLConnector:
                     placeholders.append(f"${param_idx}")
                     params.append(row[col])
                 value_groups.append(f"({', '.join(placeholders)})")
-            sql = f'INSERT INTO "{model.__table__}" ({col_sql}) VALUES {", ".join(value_groups)} RETURNING *'
+            sql = f'INSERT INTO "{model.__table__}" ({col_sql}) VALUES {", ".join(value_groups)}'
+            if returning:
+                sql += " RETURNING *"
             return sql, params
+
+        if not returning and all(len(row) == len(columns) for row in normalized):
+            return await self._copy_rows(model, columns, normalized, session)
 
         # asyncpg accepts at most 32,767 bind parameters per statement, so big
         # batches go out as several INSERTs. They share one transaction (the
@@ -516,6 +529,22 @@ class PostgreSQLConnector:
                 self._pool.log_query(sql, params)
                 out.extend(dict(r) for r in await conn.fetch(sql, *params))
             return out
+
+        if not returning:
+            async def execute_all(conn: Any) -> None:
+                for chunk in chunks:
+                    sql, params = build_insert(chunk)
+                    self._pool.log_query(sql, params)
+                    await conn.execute(sql, *params)
+
+            async with _translate_db_errors():
+                if session:
+                    async with session.transaction():
+                        await execute_all(session)
+                else:
+                    async with self._pool.transaction() as conn:
+                        await execute_all(conn)
+            return len(normalized)
 
         async with _translate_db_errors():
             if len(chunks) == 1:
@@ -534,6 +563,26 @@ class PostgreSQLConnector:
 
         instances = [model._from_row(row) for row in rows]
         return instances
+
+    async def _copy_rows(
+        self,
+        model: Type[PostgreSQLModel],
+        columns: List[str],
+        rows: List[Dict[str, Any]],
+        session: Optional[Any],
+    ) -> int:
+        """create_many(returning=False): send prepared rows with COPY. Returns the row count."""
+        records = [tuple(row[c] for c in columns) for row in rows]
+        self._pool.log_query(
+            f'COPY "{model.__table__}" ({", ".join(columns)}) FROM STDIN  -- {len(records)} rows', []
+        )
+        async with _translate_db_errors():
+            if session:
+                await session.copy_records_to_table(model.__table__, records=records, columns=columns)
+            else:
+                async with self._pool.transaction() as conn:
+                    await conn.copy_records_to_table(model.__table__, records=records, columns=columns)
+        return len(records)
 
     # ── upsert ────────────────────────────────────────────────────────────
 

@@ -72,8 +72,9 @@ class TransactionContext:
         self,
         model:   Type["PostgreSQLModel"],
         records: List[Dict[str, Any]],
-    ) -> List["PostgreSQLModel"]:
-        return await self._connector.create_many(model, records, session=self._conn)
+        returning: bool = True,
+    ) -> Union[List["PostgreSQLModel"], int]:
+        return await self._connector.create_many(model, records, session=self._conn, returning=returning)
 
     async def upsert(
         self,
