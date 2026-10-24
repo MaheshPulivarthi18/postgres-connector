@@ -353,6 +353,10 @@ class PostgreSQLModel(metaclass=ModelMeta):
             if raw is _UNLOADED:
                 raise RelationNotLoadedError(name, self.__class__.__name__)
             return raw
+        if name in self.__class__._fields:
+            raise AttributeError(
+                f"'{self.__class__.__name__}.{name}' was not selected: the query's `fields` left it out"
+            )
         raise AttributeError(
             f"'{self.__class__.__name__}' object has no attribute '{name}'"
         )
@@ -404,7 +408,9 @@ class PostgreSQLModel(metaclass=ModelMeta):
         object.__setattr__(instance, "_loaded_relations", set())
 
         for name, field_def in cls._fields.items():
-            val = row.get(name)
+            if name not in row:
+                continue  # left out by a `fields` projection: absent, not None
+            val = row[name]
             # asyncpg with JSON codec returns parsed objects, but fallback for safety
             if field_def.is_json and isinstance(val, (str, bytes)):
                 try:
@@ -524,6 +530,7 @@ class PostgreSQLModel(metaclass=ModelMeta):
         include: Optional[List[str]] = None,
         exclude: Optional[List[str]] = None,
         name: Optional[str] = None,
+        all_optional: bool = False,
     ) -> Any:
         """
         A Pydantic model of this model's fields, for FastAPI `response_model`s
@@ -537,11 +544,15 @@ class PostgreSQLModel(metaclass=ModelMeta):
             async def get_user(id: int):
                 return await db.find_by_id(User, id, {"include": ["orders"]})
 
+        `all_optional=True` makes every field optional, for routes whose
+        client picks `fields` (FilterParam): fields a projection left out are
+        then unset, and `response_model_exclude_unset=True` omits them.
+
         Requires pydantic (installed with FastAPI).
         """
         from .schemas import pydantic_model
 
-        return pydantic_model(cls, include or (), exclude or (), name)
+        return pydantic_model(cls, include or (), exclude or (), name, all_optional)
 
 
     def to_dict(self) -> Dict[str, Any]:
@@ -553,7 +564,8 @@ class PostgreSQLModel(metaclass=ModelMeta):
         result: Dict[str, Any] = {}
 
         for field_name in self.__class__._fields:
-            result[field_name] = self.__dict__.get(field_name)
+            if field_name in self.__dict__:  # fields a projection left out are omitted
+                result[field_name] = self.__dict__[field_name]
 
         for rel_name in self.__class__._relations:
             if rel_name in self._loaded_relations:
