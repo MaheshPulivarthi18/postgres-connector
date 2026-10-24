@@ -41,7 +41,7 @@ async def seeded(connector):
 
 async def test_false_field_is_hidden(connector, seeded):
     [user] = await connector.find(ExclUser, {"fields": {"password_hash": False}})
-    assert user.to_dict() == {"id": 1, "email": "a@x.io", "password_hash": None}
+    assert user.to_dict() == {"id": 1, "email": "a@x.io"}
 
 
 async def test_false_field_is_hidden_in_an_include_scope(connector, seeded):
@@ -49,4 +49,4 @@ async def test_false_field_is_hidden_in_an_include_scope(connector, seeded):
         "fields": {"password_hash": False},
         "include": [{"relation": "notes", "scope": {"fields": {"secret": False}}}],
     })
-    assert [n.to_dict() for n in user.notes] == [{"id": 1, "user_id": 1, "body": "hi", "secret": None}]
+    assert [n.to_dict() for n in user.notes] == [{"id": 1, "user_id": 1, "body": "hi"}]

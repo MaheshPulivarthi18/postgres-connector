@@ -200,7 +200,7 @@ def parse_filter(
         validate_filter(model, opts)
     except RelationNotDefinedError as exc:
         raise QueryError(str(exc)) from exc
-    except (TypeError, ValueError) as exc:  # wrong value shapes inside where/order
+    except (TypeError, ValueError, AttributeError) as exc:  # any shape the checks above missed
         raise QueryError(f"Invalid filter: {exc}") from exc
     return opts
 

@@ -81,7 +81,7 @@ class QueryBuilder:
 
     def _validate_field(self, field: str) -> None:
         """Ensure the field exists on the model to prevent SQL injection via keys."""
-        if field not in self.fields and field not in ("and", "or"):
+        if field not in self.fields:
             raise QueryError(f"Field '{field}' does not exist on model '{self.table}'")
 
     # ── Public builders ───────────────────────────────────────────────────
@@ -122,7 +122,7 @@ class QueryBuilder:
         sql_where  = f'"{self.table}"."{fk_field}" = ANY({self._p(fk_values)})'
         where_parts = [sql_where]
 
-        if opts and opts.where:
+        if opts and opts.where is not None:
             extra = self._build_where_dict(opts.where)
             if extra:
                 where_parts.append(f"({extra})")
@@ -181,7 +181,7 @@ class QueryBuilder:
         sql_where  = f'"{self.table}"."{pk_field}" = ANY({self._p(pk_values)})'
         where_parts = [sql_where]
 
-        if opts and opts.where:
+        if opts and opts.where is not None:
             extra = self._build_where_dict(opts.where)
             if extra:
                 where_parts.append(f"({extra})")
@@ -356,7 +356,7 @@ class QueryBuilder:
         return f'SELECT {self._select_columns(fields)} FROM "{self.table}"'
 
     def _where_clause(self, where: Optional[Dict[str, Any]]) -> str:
-        if not where:
+        if where is None:
             return ""
         sql = self._build_where_dict(where)
         return f"WHERE {sql}" if sql else ""
@@ -366,6 +366,8 @@ class QueryBuilder:
         Returns "" when `where` imposes no condition at all (e.g. `{}` or
         `{"and": []}`) — callers treat that as "no WHERE clause".
         """
+        if not isinstance(where, dict):
+            raise QueryError(f"'where' must be an object of conditions, got {type(where).__name__}.")
         parts: List[str] = []
 
         for key, value in where.items():
@@ -457,8 +459,12 @@ class QueryBuilder:
     def _order_clause(self, order: Optional[List[str]]) -> str:
         if not order:
             return ""
+        if not isinstance(order, (list, tuple)):
+            raise QueryError(f"'order' must be a string or a list of strings, got {type(order).__name__}.")
         parts = []
         for item in order:
+            if not isinstance(item, str):
+                raise QueryError(f"'order' items must be strings like \"name DESC\", got {item!r}.")
             tokens = item.strip().split()
             if not tokens:
                 continue
