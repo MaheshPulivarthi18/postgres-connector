@@ -63,7 +63,9 @@ def test_model_without_relations_has_no_include():
     assert "include" not in filter_example(SchOrder)
 
 
-jsonschema = pytest.importorskip("jsonschema")
+@pytest.fixture
+def jsonschema():
+    return pytest.importorskip("jsonschema")
 
 
 @pytest.mark.parametrize("flt", [
@@ -72,7 +74,7 @@ jsonschema = pytest.importorskip("jsonschema")
     {"fields": {"age": False}, "order": ["id", "age asc"], "include": ["orders", {"relation": "orders", "scope": {"limit": 2}}]},
     {"include": ["orders.items"]},
 ])
-def test_valid_filters_match_the_schema(flt):
+def test_valid_filters_match_the_schema(jsonschema, flt):
     jsonschema.validate(flt, filter_json_schema(SchUser, max_limit=50))
 
 
@@ -84,6 +86,6 @@ def test_valid_filters_match_the_schema(flt):
     {"limit": 51},
     {"wher": {}},
 ])
-def test_invalid_filters_do_not_match_the_schema(flt):
+def test_invalid_filters_do_not_match_the_schema(jsonschema, flt):
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(flt, filter_json_schema(SchUser, max_limit=50))
