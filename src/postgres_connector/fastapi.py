@@ -24,6 +24,7 @@ Requires FastAPI (or Starlette), which this module imports lazily.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple, Type
 
@@ -43,7 +44,7 @@ from .exceptions import (
 from .query_builder import QueryBuilder
 from .registry import registry
 from .relation_resolver import _dict_to_filter, _parse_include
-from .types import FilterOptions
+from .types import FilterOptions, IncludeScope
 
 if TYPE_CHECKING:
     from .model import PostgreSQLModel
@@ -135,11 +136,52 @@ def validate_filter(model: Type[PostgreSQLModel], opts: FilterOptions) -> None:
             validate_filter(registry.get(rel.target_model), scope.scope)
 
 
-def parse_filter(model: Type[PostgreSQLModel], raw: Optional[str], max_limit: Optional[int] = None) -> FilterOptions:
+def _cap_includes(
+    model: Type[PostgreSQLModel],
+    opts: FilterOptions,
+    max_limit: Optional[int],
+    max_depth: Optional[int],
+    depth: int = 1,
+) -> None:
+    """
+    Apply the request caps to every include scope, recursively: a missing
+    scope `limit` becomes `max_limit` (per parent, as scope limits are), a
+    larger one is rejected, and includes may nest at most `max_depth` levels.
+    """
+    if not opts.include:
+        return
+    if max_depth is not None and depth > max_depth:
+        raise QueryError(f"'include' may nest at most {max_depth} levels")
+    capped = []
+    for scope in (_parse_include(item) for item in opts.include):
+        rel = model._relations.get(scope.relation)
+        if rel is None:
+            raise RelationNotDefinedError(scope.relation, model.__name__)
+        inner = dataclasses.replace(scope.scope) if scope.scope else FilterOptions()
+        if max_limit is not None:
+            if inner.limit is None:
+                inner.limit = max_limit
+            elif inner.limit > max_limit:
+                raise QueryError(
+                    f"'limit' in the '{scope.relation}' include must be an integer no greater than {max_limit}"
+                )
+        _cap_includes(registry.get(rel.target_model), inner, max_limit, max_depth, depth + 1)
+        capped.append(IncludeScope(relation=scope.relation, scope=inner))
+    opts.include = capped
+
+
+def parse_filter(
+    model: Type[PostgreSQLModel],
+    raw: Optional[str],
+    max_limit: Optional[int] = None,
+    max_include_depth: Optional[int] = None,
+) -> FilterOptions:
     """
     Parse and validate a JSON `filter` string for `model`. A missing `limit`
-    becomes `max_limit`; a larger one is rejected. Every problem is a
-    QueryError, i.e. bad client input.
+    becomes `max_limit`; a larger one is rejected. The same cap applies to
+    each include scope (per parent), and includes may nest at most
+    `max_include_depth` levels. Every problem is a QueryError, i.e. bad
+    client input.
     """
     try:
         data = json.loads(raw) if raw else {}
@@ -154,6 +196,7 @@ def parse_filter(model: Type[PostgreSQLModel], raw: Optional[str], max_limit: Op
                 opts.limit = max_limit
             elif opts.limit > max_limit:  # already a non-negative int (_dict_to_filter)
                 raise QueryError(f"'limit' must be an integer no greater than {max_limit}")
+        _cap_includes(model, opts, max_limit, max_include_depth)
         validate_filter(model, opts)
     except RelationNotDefinedError as exc:
         raise QueryError(str(exc)) from exc
@@ -162,11 +205,17 @@ def parse_filter(model: Type[PostgreSQLModel], raw: Optional[str], max_limit: Op
     return opts
 
 
-def FilterParam(model: Type[PostgreSQLModel], max_limit: Optional[int] = 100) -> Callable[..., FilterOptions]:  # noqa: N802
+def FilterParam(  # noqa: N802
+    model: Type[PostgreSQLModel],
+    max_limit: Optional[int] = 100,
+    max_include_depth: Optional[int] = 3,
+) -> Callable[..., FilterOptions]:
     """
     A FastAPI dependency that reads `?filter=<json>`, validates it against
     `model` and returns FilterOptions for `find()` / `find_and_count()`.
-    Invalid filters are HTTP 400 with the QueryError message: with
+    `max_limit` caps the top-level `limit` and each include scope's `limit`
+    (per parent); `max_include_depth` caps include nesting. `None` disables
+    either cap. Invalid filters are HTTP 400 with the QueryError message: with
     register_exception_handlers() installed the body has the same
     {"error", "detail"} shape as every other library error, otherwise it is
     FastAPI's plain {"detail"}. The parameter is documented in the OpenAPI
@@ -180,7 +229,7 @@ def FilterParam(model: Type[PostgreSQLModel], max_limit: Optional[int] = 100) ->
 
     def dependency(request: Request, filter: Optional[str] = Query(None, description=FILTER_DESCRIPTION)) -> FilterOptions:
         try:
-            return parse_filter(model, filter, max_limit)
+            return parse_filter(model, filter, max_limit, max_include_depth)
         except QueryError as exc:
             if getattr(request.app.state, _HANDLERS_FLAG, False):
                 raise  # the registered QueryError handler answers 400 in the common shape
