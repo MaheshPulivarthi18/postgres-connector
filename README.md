@@ -364,6 +364,7 @@ async def get_user(id: int):
 - Included relations are nested generated models: a list for `hasMany` / `hasManyThrough`, an optional object for `belongsTo` / `hasOne`.
 - The generated model reads ORM instances directly (`from_attributes`), so routes return the instance as-is.
 - Results are cached per arguments. Pass `name=` to choose the schema name shown in OpenAPI.
+- `all_optional=True` makes every field optional, for routes where the client picks `fields` (see below).
 - Needs Pydantic v2, which FastAPI installs.
 
 ### REST filters (`?filter=`)
@@ -381,6 +382,16 @@ async def list_users(filter: FilterOptions = Depends(FilterParam(User, max_limit
 ```
 
 `GET /users?filter={"where":{"active":true},"order":["name ASC"],"limit":20,"include":["orders"]}`
+
+A `fields` projection leaves the other fields out of the response entirely, as in LoopBack, rather than sending them as `null`. With a generated `response_model`, use `all_optional=True` and `response_model_exclude_unset=True`, since the client decides which fields are present:
+
+```python
+UserOut = User.pydantic_model(all_optional=True)
+
+@app.get("/users", response_model=List[UserOut], response_model_exclude_unset=True)
+async def list_users(filter: FilterOptions = Depends(FilterParam(User))):
+    return await db.find(User, filter)
+```
 
 Without a `limit`, `max_limit` is used; a larger `limit` is rejected. Pass `max_limit=None` for no cap.
 

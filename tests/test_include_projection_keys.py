@@ -83,12 +83,12 @@ async def test_exclusion_form_keeps_hiding_other_fields(connector, data):
     # {name: false} must stay an exclusion: adding stitch keys used to turn it
     # into a list of the excluded names, selecting exactly the hidden column.
     users = await connector.find(PkUser, {"fields": {"name": False}, "order": ["id ASC"], "include": ["posts"]})
-    assert [u.name for u in users] == [None, None, None]
+    assert ["name" in u.to_dict() for u in users] == [False, False, False]
     assert [len(u.posts) for u in users] == [1, 1, 1]
     users = await connector.find(
         PkUser, {"order": ["id ASC"], "include": [{"relation": "posts", "scope": {"fields": {"title": False}}}]}
     )
-    assert [p.title for u in users for p in u.posts] == [None, None, None]
+    assert ["title" in p.to_dict() for u in users for p in u.posts] == [False, False, False]
 
 
 async def test_exclusion_of_a_key_column_still_stitches(connector, data):
