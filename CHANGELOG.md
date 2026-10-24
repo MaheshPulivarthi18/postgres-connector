@@ -1,6 +1,6 @@
 # Changelog
 
-## [3.0.0] - 2026-10-22
+## [3.0.0] - 2026-10-24
 
 FastAPI integration, LoopBack filter compatibility, and fixes from the 2.0.0 review. Major version because of the timestamp change below; see [Upgrading to 3.0](README.md#upgrading-to-30).
 
@@ -17,6 +17,10 @@ FastAPI integration, LoopBack filter compatibility, and fixes from the 2.0.0 rev
 - `Model.pydantic_model(include=..., exclude=...)` for FastAPI `response_model`s and OpenAPI schemas (#62). Needs Pydantic 2, now required by the `fastapi` extra.
 - `InvalidValueError` (bad values, SQLSTATE class 22) and `ReadOnlyTransactionError` instead of raw asyncpg errors (#60).
 - Benchmarks against SQLAlchemy 2.x in `benchmarks/` (#29).
+- `create_many(..., returning=False)` inserts with COPY and returns the row count, 2–4× faster for big batches (#69, #75).
+- `FilterParam` documents `?filter=` in OpenAPI with a per-model schema and example; `filter_json_schema(Model)` returns the schema (#70, #76).
+- `FilterParam(max_include_depth=3)`, and `max_limit` now also caps every include scope, per parent (#67, #73).
+- `Model.pydantic_model(all_optional=True)`, for routes where the client picks `fields` (#68, #74).
 
 ### Changed
 - `create()`/`create_many()` raise `QueryError` for keys that aren't model fields; they used to drop them silently (#50).
@@ -24,6 +28,8 @@ FastAPI integration, LoopBack filter compatibility, and fixes from the 2.0.0 rev
 - `migrate()` creates foreign-key constraints for `Field(foreign_key="table.column")`. On an existing database, rows that point at a missing parent must be fixed before migrating (#54).
 - Models are iterable: `dict(instance) == instance.to_dict()`, so FastAPI routes can return them as-is (#58).
 - LoopBack filter shapes: `order` as a string, `limit`/`skip` as numeric strings, `fields` as a string or `{name: bool}`. `{name: false}` selects every other field (#46, #64).
+- Fields a `fields` projection leaves out are absent from the instance, `to_dict()` and responses, instead of `None`. Reading one raises `AttributeError` (#68, #74).
+- JSON/JSONB codecs are registered in binary format (needed for COPY); values read and written are the same (#75).
 
 ### Fixed
 - `Field()`/`Relation()` options declared on plain mixin classes were lost (#27).
@@ -33,6 +39,7 @@ FastAPI integration, LoopBack filter compatibility, and fixes from the 2.0.0 rev
 - README examples failed on Python 3.8 (#52).
 - `create_many()` failed above asyncpg's 32,767 query arguments; large batches are now split inside one transaction (#57).
 - An include came back empty when `fields` left out the key columns (#56).
+- Malformed filters (`order: [1]`, `where: "x"`, `order: ["and"]`, ...) raised `AttributeError` or raw asyncpg errors, an HTTP 500, instead of `QueryError` (#66, #72).
 
 ## [2.0.0] - 2026-10-21
 
