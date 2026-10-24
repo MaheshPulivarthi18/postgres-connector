@@ -114,11 +114,65 @@ def register_exception_handlers(app: Any, expose_db_detail: bool = False) -> Non
 
 # ── ?filter= query parameter ─────────────────────────────────────────────────
 
-FILTER_DESCRIPTION = (
-    "LoopBack-style filter as JSON, e.g. "
-    '{"where": {"active": true}, "order": ["name ASC"], "limit": 20, "skip": 0, '
-    '"fields": ["id", "name"], "include": ["orders"]}'
-)
+_EXAMPLE_VALUES = {int: 1, float: 1.5, str: "text", bool: True}
+
+
+def filter_json_schema(model: Type[PostgreSQLModel], max_limit: Optional[int] = None) -> Dict[str, Any]:
+    """
+    JSON Schema of a `filter` for `model`, like LoopBack's getFilterJsonSchemaFor():
+    the model's field names for `fields` / `order` / `where` keys, its relation
+    names for `include`, and `max_limit` on `limit`. It documents the
+    parameter; parse_filter() is what enforces it.
+    """
+    fields = list(model._fields)
+    relations = list(model._relations)
+    order_item = {"type": "string", "pattern": f"^({'|'.join(fields)})( (ASC|DESC|asc|desc))?$"}
+    limit: Dict[str, Any] = {"type": "integer", "minimum": 0}
+    if max_limit is not None:
+        limit["maximum"] = max_limit
+    conditions = {"type": "array", "items": {"type": "object"}}
+    properties: Dict[str, Any] = {
+        "where": {
+            "type": "object",
+            "properties": {**{f: {} for f in fields}, "and": conditions, "or": conditions},
+            "additionalProperties": False,
+        },
+        "fields": {"oneOf": [
+            {"type": "array", "items": {"enum": fields}, "uniqueItems": True},
+            {"type": "object", "properties": {f: {"type": "boolean"} for f in fields}, "additionalProperties": False},
+        ]},
+        "order": {"oneOf": [order_item, {"type": "array", "items": order_item}]},
+        "limit": limit,
+        "skip": {"type": "integer", "minimum": 0},
+    }
+    if relations:
+        names = "|".join(relations)
+        properties["include"] = {"type": "array", "items": {"oneOf": [
+            {"type": "string", "pattern": f"^({names})(\\..+)?$"},  # dotted paths nest
+            {
+                "type": "object",
+                "properties": {"relation": {"enum": relations}, "scope": {"type": "object"}},
+                "required": ["relation"],
+            },
+        ]}}
+    return {"title": f"{model.__name__}Filter", "type": "object", "properties": properties, "additionalProperties": False}
+
+
+def filter_example(model: Type[PostgreSQLModel], max_limit: Optional[int] = None) -> Dict[str, Any]:
+    """An example filter for `model`, built from its own fields and relations."""
+    pk = model._get_primary_key()
+    others = [name for name in model._fields if name != pk]
+    example: Dict[str, Any] = {}
+    typed = [name for name in others if model._fields[name].python_type in _EXAMPLE_VALUES]
+    if typed:
+        example["where"] = {typed[0]: _EXAMPLE_VALUES[model._fields[typed[0]].python_type]}
+    if others:
+        example["order"] = [f"{others[0]} ASC"]
+    example["limit"] = min(20, max_limit) if max_limit is not None else 20
+    example["fields"] = [name for name in [pk] + others[:1] if name]
+    if model._relations:
+        example["include"] = [next(iter(model._relations))]
+    return example
 
 
 def validate_filter(model: Type[PostgreSQLModel], opts: FilterOptions) -> None:
@@ -227,7 +281,24 @@ def FilterParam(  # noqa: N802
     """
     from fastapi import HTTPException, Query, Request
 
-    def dependency(request: Request, filter: Optional[str] = Query(None, description=FILTER_DESCRIPTION)) -> FilterOptions:
+    example = json.dumps(filter_example(model, max_limit))
+    description = (
+        f"LoopBack-style filter for {model.__name__} as JSON, e.g. {example}. "
+        f"Fields: {', '.join(model._fields)}."
+        + (f" Relations: {', '.join(model._relations)}." if model._relations else "")
+    )
+    # OpenAPI 3.1: the parameter is a string holding JSON of this shape.
+    schema_extra = {"contentMediaType": "application/json", "contentSchema": filter_json_schema(model, max_limit)}
+
+    def dependency(
+        request: Request,
+        filter: Optional[str] = Query(
+            None,
+            description=description,
+            json_schema_extra=schema_extra,
+            openapi_examples={"example": {"summary": f"{model.__name__} filter", "value": example}},
+        ),
+    ) -> FilterOptions:
         try:
             return parse_filter(model, filter, max_limit, max_include_depth)
         except QueryError as exc:

@@ -378,7 +378,7 @@ async def get_user(id: int):
 
 ### REST filters (`?filter=`)
 
-Clients can send the whole query as one JSON `filter` parameter, LoopBack-style. `FilterParam` parses it, checks keys, fields, operators and relations (at any include depth) against the model, caps `limit`, and documents the parameter in OpenAPI. Bad input is an HTTP 400 with the reason.
+Clients can send the whole query as one JSON `filter` parameter, LoopBack-style. `FilterParam` parses it, checks keys, fields, operators and relations (at any include depth) against the model, caps `limit`, and documents the parameter in OpenAPI with a schema and example built from the model, listing its fields and relations, like LoopBack's filter schema (`filter_json_schema(Model)` returns the schema itself). Bad input is an HTTP 400 with the reason.
 
 ```python
 from fastapi import Depends
