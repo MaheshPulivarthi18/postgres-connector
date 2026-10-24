@@ -27,19 +27,40 @@ from .exceptions import ConnectionPoolError
 logger = logging.getLogger(__name__)
 
 
+def _encode_jsonb(value: Any) -> bytes:
+    return b"\x01" + json.dumps(value).encode("utf-8")  # jsonb binary format: version 1, then the text
+
+
+def _decode_jsonb(data: bytes) -> Any:
+    return json.loads(data[1:].decode("utf-8"))
+
+
+def _encode_json(value: Any) -> bytes:
+    return json.dumps(value).encode("utf-8")
+
+
+def _decode_json(data: bytes) -> Any:
+    return json.loads(data.decode("utf-8"))
+
+
 async def _init_connection(conn: "asyncpg.Connection") -> None:
-    """Register JSON/JSONB codecs so Python dicts are handled transparently."""
+    """
+    Register JSON/JSONB codecs so Python dicts are handled transparently.
+    Binary format, so COPY (create_many(returning=False)) can send them too.
+    """
     await conn.set_type_codec(
         "jsonb",
-        encoder=json.dumps,
-        decoder=json.loads,
+        encoder=_encode_jsonb,
+        decoder=_decode_jsonb,
         schema="pg_catalog",
+        format="binary",
     )
     await conn.set_type_codec(
         "json",
-        encoder=json.dumps,
-        decoder=json.loads,
+        encoder=_encode_json,
+        decoder=_decode_json,
         schema="pg_catalog",
+        format="binary",
     )
 
 
