@@ -425,7 +425,7 @@ affected = await connector.raw_execute("DELETE FROM sessions WHERE expired = $1"
 connector = PostgreSQLConnector(..., echo=True)
 ```
 
-Prints every SQL query and its parameters to stdout with color coding.
+Prints every SQL query and its parameters to stdout, with no logging setup needed. Colour is used only when stdout is a TTY (and `NO_COLOR` is unset). Output goes through the non-propagating `postgres_connector.echo` logger; to redirect it, attach your own handler to that logger any time before the first query is echoed (creating the connector does not install anything); the default stdout handler is only added when the logger has none.
 
 ## Deletes
 

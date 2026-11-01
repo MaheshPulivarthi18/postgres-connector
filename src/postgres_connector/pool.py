@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import sys
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Optional, Dict, List
 
@@ -25,6 +27,67 @@ except ImportError:
 from .exceptions import ConnectionPoolError
 
 logger = logging.getLogger(__name__)
+
+# Dedicated logger for echo=True query output. It does not propagate, so it
+# never duplicates through the root logger and leaves `logger` untouched.
+echo_logger = logging.getLogger("postgres_connector.echo")
+echo_logger.propagate = False
+
+_QUERY_TAG = "[ORM QUERY]"
+_PARAMS_TAG = "[PARAMS]   "
+
+
+class _StdoutHandler(logging.StreamHandler):
+    """StreamHandler that resolves sys.stdout on every emit."""
+
+    def __init__(self) -> None:
+        logging.Handler.__init__(self)
+
+    @property
+    def stream(self):  # type: ignore[override]
+        return sys.stdout
+
+    @stream.setter
+    def stream(self, value: Any) -> None:
+        pass
+
+
+class _EchoFormatter(logging.Formatter):
+    """Adds ANSI colour to the tags only when stdout is a TTY and NO_COLOR is unset."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        try:
+            use_colour = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+        except Exception:
+            use_colour = False
+        if use_colour:
+            text = text.replace(_QUERY_TAG, "\033[94m" + _QUERY_TAG + "\033[0m", 1)
+            text = text.replace(_PARAMS_TAG, "\033[92m" + _PARAMS_TAG + "\033[0m", 1)
+        return text
+
+
+_echo_handler_installed = False
+
+
+def _ensure_echo_handler() -> None:
+    """Attach the default stdout handler to the echo logger once (idempotent).
+
+    Done once per process, so a handler the user removed or replaced stays that way.
+    If the application already attached a handler to the echo logger, it owns the
+    output and no default handler is added.
+    """
+    global _echo_handler_installed
+    if _echo_handler_installed:
+        return
+    _echo_handler_installed = True
+    echo_logger.setLevel(logging.INFO)
+    if echo_logger.handlers:
+        return
+    handler = _StdoutHandler()
+    handler.setFormatter(_EchoFormatter("%(message)s"))
+    echo_logger.addHandler(handler)
+    echo_logger.setLevel(logging.INFO)
 
 
 def _encode_jsonb(value: Any) -> bytes:
@@ -275,12 +338,13 @@ class ConnectionPool:
             )
 
     def log_query(self, sql: str, params: Optional[List[Any]] = None) -> None:
-        """Log SQL queries if echo is enabled."""
+        """Print SQL queries to stdout if echo is enabled."""
         if self._echo:
+            _ensure_echo_handler()
             cleaned_sql = " ".join(sql.split())
-            logger.info("\033[94m[ORM QUERY]\033[0m %s", cleaned_sql)
+            echo_logger.info("%s %s", _QUERY_TAG, cleaned_sql)
             if params:
-                logger.info("\033[92m[PARAMS]   \033[0m %s", params)
+                echo_logger.info("%s %s", _PARAMS_TAG, params)
 
     def __repr__(self) -> str:
         status = "connected" if self.is_connected else "disconnected"
