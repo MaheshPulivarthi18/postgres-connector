@@ -627,9 +627,20 @@ class PostgreSQLConnector:
         """
         now = _utc_now()
         prepared = dict(data)
+        # Default update set is computed from the caller's own keys (plus
+        # auto_now fields) *before* insert-only values (auto_now_add stamp,
+        # Python defaults) are added, so a conflict never resets them.
+        if update_fields is None:
+            update_fields = [k for k in data if k not in conflict_target]
+            for name, field_def in model._fields.items():
+                if (field_def.auto_now and name not in update_fields
+                        and name not in conflict_target):
+                    update_fields.append(name)
         for name, field_def in model._fields.items():
             if field_def.auto_now_add and name not in prepared:
                 prepared[name] = now
+            elif name not in prepared and name in model._field_defaults:
+                prepared[name] = model._default_for(name)
             if field_def.auto_now:
                 prepared[name] = now
         self._validate_field_types(model, prepared)
