@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- `echo=True` now prints queries to stdout without any logging setup (#83). Query lines go to the non-propagating `postgres_connector.echo` logger as plain text; colour is applied only on a TTY. They are no longer emitted on `postgres_connector.pool`.
+
 ## [3.0.0] - 2026-10-24
 
 FastAPI integration, LoopBack filter compatibility, and fixes from the 2.0.0 review. Major version because of the timestamp change below; see [Upgrading to 3.0](README.md#upgrading-to-30).
